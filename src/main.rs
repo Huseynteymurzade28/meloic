@@ -1,21 +1,18 @@
 mod library;
-mod player;
 mod ui;
 
 fn main() {
     let tracks = library::scan_music("music");
     if tracks.is_empty() {
         println!("🎵 No music found!");
+        std::thread::sleep(std::time::Duration::from_secs(2));
         return;
     }
 
+    // UI'ı çalıştır - artık tek seferlik
     match ui::run_ui(&tracks) {
-        Ok(Some(selected_track)) => {
-            println!("Selected track: {}", selected_track.display());
-            player::play_file(&selected_track);
-        }
-        Ok(None) => {
-            println!("No track selected.");
+        Ok(_) => {
+            println!("👋 Exiting meloic. Goodbye!");
         }
         Err(e) => {
             eprintln!("Error: {}", e);
