@@ -22,7 +22,7 @@ cargo install meloic
 ### Build from Source
 
 ```bash
-git clone https://github.com/yourusername/meloic.git
+git clone https://github.com/Huseynteymurzade28/meloic.git
 cd meloic
 cargo build --release
 ```
@@ -39,12 +39,12 @@ meloic
 
 ### Controls
 
-| Key | Description |
-|-----|-------------|
-| `↑/↓` | Navigate between tracks |
-| `Enter` | Play selected track |
-| `p` | Pause/resume playback |
-| `q` | Quit application |
+| Key     | Description             |
+| ------- | ----------------------- |
+| `↑/↓`   | Navigate between tracks |
+| `Enter` | Play selected track     |
+| `p`     | Pause/resume playback   |
+| `q`     | Quit application        |
 
 ## 🏗️ Project Structure
 
@@ -57,6 +57,10 @@ src/
 │   └── widgets.rs  # UI components
 ├── library.rs      # Music library management
 └── main.rs         # Application entry point
+Cargo.toml         # Project configuration and dependencies
+Cargo.lock        # Locked dependencies
+README.MD          # Project documentation
+.gitignore        # Ignored files for git
 ```
 
 ## 🛠️ Development
@@ -64,7 +68,7 @@ src/
 To develop the project:
 
 ```bash
-git clone https://github.com/yourusername/meloic.git
+git clone https://github.com/Huseynteymurzade28/meloic.git
 cd meloic
 cargo run
 ```
@@ -91,8 +95,9 @@ This project is licensed under the [MIT License](LICENSE).
 ## 📞 Contact
 
 For questions or suggestions:
+
 - GitHub Issues: [Issues page](https://github.com/yourusername/meloic/issues)
 
 ---
 
-*Music in its purest form. In the terminal, simple and powerful.* 🎵
+_Music in its purest form. In the terminal, simple and powerful._ 🎵
