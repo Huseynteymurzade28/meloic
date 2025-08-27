@@ -17,7 +17,7 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         Line::from(vec![Span::styled(
             "🎵 MELOIC - Music Player Help",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Rgb(0, 255, 255)) // Neon cyan
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
@@ -25,7 +25,7 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         Line::from(vec![Span::styled(
             "📍 NAVIGATION",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Rgb(255, 255, 0)) // Neon yellow
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  ↑/↓ or j/k     - Move up/down in track list"),
@@ -37,7 +37,7 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         Line::from(vec![Span::styled(
             "🎮 PLAYBACK CONTROLS",
             Style::default()
-                .fg(Color::Green)
+                .fg(Color::Rgb(0, 255, 0)) // Neon green
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  Enter/Space    - Play selected track"),
@@ -49,7 +49,7 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         Line::from(vec![Span::styled(
             "✨ FEATURES",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(Color::Rgb(255, 0, 255)) // Neon magenta
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  r or F5        - Refresh music library"),
@@ -58,7 +58,8 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         // System bölümü
         Line::from(vec![Span::styled(
             "⚙️  SYSTEM",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Rgb(255, 100, 0)) // Neon orange
+            .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  q or Esc       - Quit application"),
         Line::from(""),
@@ -66,7 +67,7 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         Line::from(vec![Span::styled(
             "🎧 SUPPORTED FORMATS",
             Style::default()
-                .fg(Color::Blue)
+                .fg(Color::Rgb(100, 150, 255)) // Neon blue
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from("  MP3, FLAC, WAV, OGG, M4A, AAC"),
@@ -74,14 +75,15 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
         // Footer
         Line::from(vec![Span::styled(
             "💡 TIP: Meloic scans 'music' folder or current directory for audio files",
-            Style::default().fg(Color::Gray),
+            Style::default().fg(Color::Rgb(150, 150, 150)), // Parlak gri
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Press any key to close this help screen",
+            "Press h, ? or f1 key to close this help screen",
             Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+                .fg(Color::Rgb(255, 255, 255)) // Parlak beyaz
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
         )]),
     ];
 
@@ -92,12 +94,12 @@ pub fn draw_help_screen(f: &mut Frame, _app: &App) {
                 .title(" 🆘 Help & Controls ")
                 .title_style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(Color::Rgb(0, 255, 255)) // Neon cyan
                         .add_modifier(Modifier::BOLD),
                 )
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(Color::Rgb(255, 0, 255))), // Neon magenta border
         )
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(Color::Rgb(255, 255, 255))) // Parlak beyaz text
         .alignment(Alignment::Left);
 
     f.render_widget(help_widget, area);

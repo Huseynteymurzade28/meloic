@@ -55,33 +55,38 @@ fn draw_header_panel(f: &mut Frame, area: Rect, app: &App) {
         )
         .split(area);
 
-    // Sol: Logo ve başlık
+    // Sol: Logo ve başlık - Neon tema
     let title = Paragraph::new(vec![Line::from(vec![
         Span::styled(
             "🎵 ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Rgb(255, 0, 255)) // Neon magenta
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "MELOIC",
             Style::default()
-                .fg(Color::White)
+                .fg(Color::Rgb(0, 255, 255)) // Neon cyan
                 .add_modifier(Modifier::BOLD),
         ),
     ])])
-    .block(Block::default().borders(Borders::ALL))
+    .block(Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(255, 0, 255)))) // Neon magenta border
     .alignment(Alignment::Center);
     f.render_widget(title, header_chunks[0]);
 
-    // Sağ: İstatistikler
+    // Sağ: İstatistikler - Neon tema
     let stats_text = format!("📀 {} tracks", app.total_tracks);
 
     let stats = Paragraph::new(vec![Line::from(vec![Span::styled(
         stats_text,
-        Style::default().fg(Color::Yellow),
+        Style::default().fg(Color::Rgb(255, 255, 0)), // Neon yellow
     )])])
-    .block(Block::default().borders(Borders::ALL).title("Library"))
+    .block(Block::default()
+        .borders(Borders::ALL)
+        .title("Library")
+        .border_style(Style::default().fg(Color::Rgb(0, 255, 0)))) // Neon green border
     .alignment(Alignment::Center);
     f.render_widget(stats, header_chunks[2]);
 }
@@ -96,9 +101,9 @@ fn draw_enhanced_music_list(f: &mut Frame, area: Rect, app: &mut App) {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("🎼 Music Library")
-                    .style(Style::default().fg(Color::Gray)),
+                    .style(Style::default().fg(Color::Rgb(255, 0, 255))), // Neon magenta
             )
-            .style(Style::default().fg(Color::Yellow))
+            .style(Style::default().fg(Color::Rgb(255, 255, 0))) // Neon yellow
             .alignment(Alignment::Center);
 
         f.render_widget(empty_widget, area);
@@ -126,26 +131,26 @@ fn draw_enhanced_music_list(f: &mut Frame, area: Rect, app: &mut App) {
                 _ => "🎼",
             };
 
-            // Seçili öğe için özel stil
+            // Seçili öğe için özel stil - Neon tema
             let number_style = if Some(display_idx) == selected {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Rgb(0, 255, 255)) // Neon cyan
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::Rgb(100, 100, 100)) // Daha parlak gri
             };
 
             let filename_style = if Some(display_idx) == selected {
                 Style::default()
-                    .fg(Color::White)
+                    .fg(Color::Rgb(255, 255, 255)) // Parlak beyaz
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(Color::Rgb(180, 180, 180)) // Parlak gri
             };
 
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{:3}. ", display_idx + 1), number_style),
-                Span::styled(format!("{} ", icon), Style::default().fg(Color::Green)),
+                Span::styled(format!("{} ", icon), Style::default().fg(Color::Rgb(0, 255, 0))), // Neon green
                 Span::styled(filename, filename_style),
             ]))
         })
@@ -158,12 +163,12 @@ fn draw_enhanced_music_list(f: &mut Frame, area: Rect, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(list_title)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(Color::Rgb(0, 255, 255))), // Neon cyan border
         )
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::White)
+                .bg(Color::Rgb(255, 0, 255)) // Neon magenta background
+                .fg(Color::Rgb(255, 255, 255)) // Parlak beyaz text
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -192,25 +197,26 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
 
     let selection_widget = Paragraph::new(current_selection).style(
         Style::default()
-            .fg(Color::Cyan)
+            .fg(Color::Rgb(0, 255, 255)) // Neon cyan
             .add_modifier(Modifier::BOLD),
     );
 
     f.render_widget(selection_widget, top_chunks[0]);
 
-    // Orta: Help mesajı
+    // Orta: Help mesajı - Neon tema
     let help_text = "Press 'h' for help";
     let help_widget = Paragraph::new(help_text)
         .style(
             Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+                .fg(Color::Rgb(255, 255, 0)) // Neon yellow
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::UNDERLINED),
         )
         .alignment(Alignment::Center);
 
     f.render_widget(help_widget, top_chunks[1]);
 
-    // Sağ: Çalan şarkı durumu
+    // Sağ: Çalan şarkı durumu - Neon tema
     let playback_info = match (&app.current_track, &app.playback_state) {
         (Some(track), state) => {
             let filename = track
@@ -230,7 +236,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let playback_widget = Paragraph::new(playback_info)
         .style(
             Style::default()
-                .fg(Color::Green)
+                .fg(Color::Rgb(0, 255, 0)) // Neon green
                 .add_modifier(Modifier::BOLD),
         )
         .alignment(Alignment::Right);
