@@ -1,0 +1,10 @@
+[package]
+name = "meloic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rodio = "0.18.1"
+ratatui = { version = "0.27.0", features = ["crossterm"] }
+crossterm = "0.27.0"
+walkdir = "2.3"
