@@ -45,6 +45,7 @@ meloic
 | `Enter` | Play selected track     |
 | `p`     | Pause/resume playback   |
 | `q`     | Quit application        |
+| `?` or `h` | Toggle help menu       |
 
 ## 🏗️ Project Structure
 

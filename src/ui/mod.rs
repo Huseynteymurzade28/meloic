@@ -1,5 +1,6 @@
 pub mod app;
 pub mod events;
+pub mod help;
 pub mod widgets;
 
 use crossterm::{

@@ -1,10 +1,11 @@
 use crate::ui::app::{App, ViewMode};
+use crate::ui::help::draw_help_screen;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
 /// Ana UI'ı çiz
@@ -23,8 +24,8 @@ fn draw_main_screen(f: &mut Frame, app: &mut App) {
         .constraints(
             [
                 Constraint::Length(3), // Başlık + durum çubuğu
-                Constraint::Min(10),   // Ana liste
-                Constraint::Length(2), // Alt durum çubuğu
+                Constraint::Min(8),    // Ana liste 
+                Constraint::Length(1), // Alt durum çubuğu (tek satır)
             ]
             .as_ref(),
         )
@@ -172,12 +173,13 @@ fn draw_enhanced_music_list(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Alt durum çubuğu
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let chunks = Layout::default()
+    // Tek satır: Seçili track, help mesajı ve çalan şarkı
+    let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(30), // Sol: Track info
-            Constraint::Min(20),    // Orta: Çalan şarkı
-            Constraint::Length(50), // Sağ: Kontroller
+            Constraint::Percentage(30), // Sol: Track info
+            Constraint::Percentage(40), // Orta: Help mesajı
+            Constraint::Percentage(30), // Sağ: Çalan şarkı
         ])
         .split(area);
 
@@ -188,17 +190,27 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         .map(|i| format!("Track {}/{}", i + 1, app.filtered_items.len()))
         .unwrap_or_else(|| "No selection".to_string());
 
-    let selection_widget = Paragraph::new(current_selection)
+    let selection_widget = Paragraph::new(current_selection).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    f.render_widget(selection_widget, top_chunks[0]);
+
+    // Orta: Help mesajı
+    let help_text = "Press 'h' for help";
+    let help_widget = Paragraph::new(help_text)
         .style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::TOP | Borders::RIGHT));
+        .alignment(Alignment::Center);
 
-    f.render_widget(selection_widget, chunks[0]);
+    f.render_widget(help_widget, top_chunks[1]);
 
-    // Orta: Çalan şarkı durumu
+    // Sağ: Çalan şarkı durumu
     let playback_info = match (&app.current_track, &app.playback_state) {
         (Some(track), state) => {
             let filename = track
@@ -221,105 +233,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::TOP | Borders::RIGHT));
+        .alignment(Alignment::Right);
 
-    f.render_widget(playback_widget, chunks[1]);
-
-    // Sağ: Kontroller
-    let controls_text = " Enter: Play • p: Pause/Resume • x: Stop • q: Quit";
-    let controls_widget = Paragraph::new(controls_text)
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::TOP));
-
-    f.render_widget(controls_widget, chunks[2]);
+    f.render_widget(playback_widget, top_chunks[2]);
 }
 
-/// Yardım ekranı
-fn draw_help_screen(f: &mut Frame, _app: &App) {
-    let area = centered_rect(60, 70, f.size());
 
-    f.render_widget(Clear, area);
 
-    let help_text = vec![
-        Line::from(vec![Span::styled(
-            "🎵 MELOIC - Help",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Navigation:",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  ↑/↓ or j/k     - Move up/down"),
-        Line::from("  Page Up/Down   - Move 10 items"),
-        Line::from("  Home/End or g/G - Go to top/bottom"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Playback:",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Enter or Space  - Play selected track"),
-        Line::from("  p              - Pause/Resume playback"),
-        Line::from("  x              - Stop playback completely"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Features:",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  s              - Shuffle (random selection)"),
-        Line::from("  r or F5        - Refresh library"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Controls:",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  q or Esc       - Quit"),
-        Line::from("  ? or F1        - Toggle this help"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Press any key to close",
-            Style::default().fg(Color::DarkGray),
-        )]),
-    ];
-
-    let help_widget = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Help")
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(help_widget, area);
-}
-
-/// Ortalanmış rectangle hesapla
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}

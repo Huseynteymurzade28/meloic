@@ -47,7 +47,9 @@ pub fn handle_events() -> io::Result<Option<AppAction>> {
                 (KeyCode::Enter, _) | (KeyCode::Char(' '), _) => Some(AppAction::SelectItem),
 
                 // Özel fonksiyonlar
-                (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => Some(AppAction::ToggleHelp),
+                (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) | (KeyCode::F(1), _) => {
+                    Some(AppAction::ToggleHelp)
+                }
                 (KeyCode::Char('r'), _) | (KeyCode::F(5), _) => Some(AppAction::Refresh),
                 (KeyCode::Char('s'), _) => Some(AppAction::Random),
 
