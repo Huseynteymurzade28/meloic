@@ -13,7 +13,12 @@ Meloic is a modern Terminal User Interface (TUI) music player built with Rust. M
 
 ## 📦 Installation
 
-### Install via Cargo (Recommended)
+### Install from AUR
+```bash
+yay -S meloic
+```
+
+### Install via Cargo
 
 ```bash
 cargo install meloic
