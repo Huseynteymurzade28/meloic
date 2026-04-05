@@ -8,6 +8,11 @@ pub enum AppAction {
     NextItem,
     PreviousItem,
     SelectItem,
+    StartSearch,
+    SearchInput(char),
+    SearchBackspace,
+    ConfirmSearch,
+    CancelSearch,
     NextPage,
     PreviousPage,
     GoToTop,
@@ -15,14 +20,32 @@ pub enum AppAction {
     ToggleHelp,
     Refresh,
     Random,
+    NextTrack,
+    PreviousTrack,
+    CycleSort,
+    CycleRepeat,
+    CycleTheme,
+    ToggleWaveform,
     TogglePause,
     StopPlayback,
 }
 
 /// Event'ları dinle ve uygun aksiyonu döndür
-pub fn handle_events() -> io::Result<Option<AppAction>> {
+pub fn handle_events(is_searching: bool) -> io::Result<Option<AppAction>> {
     if event::poll(Duration::from_millis(100))? {
         if let Event::Key(key) = event::read()? {
+            if is_searching {
+                return Ok(match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) => Some(AppAction::CancelSearch),
+                    (KeyCode::Enter, _) => Some(AppAction::ConfirmSearch),
+                    (KeyCode::Backspace, _) => Some(AppAction::SearchBackspace),
+                    (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                        Some(AppAction::SearchInput(ch))
+                    }
+                    _ => None,
+                });
+            }
+
             return Ok(match (key.code, key.modifiers) {
                 // Çıkış
                 (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(AppAction::Quit),
@@ -45,6 +68,7 @@ pub fn handle_events() -> io::Result<Option<AppAction>> {
 
                 // Seçim
                 (KeyCode::Enter, _) | (KeyCode::Char(' '), _) => Some(AppAction::SelectItem),
+                (KeyCode::Char('/'), _) => Some(AppAction::StartSearch),
 
                 // Özel fonksiyonlar
                 (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) | (KeyCode::F(1), _) => {
@@ -52,6 +76,12 @@ pub fn handle_events() -> io::Result<Option<AppAction>> {
                 }
                 (KeyCode::Char('r'), _) | (KeyCode::F(5), _) => Some(AppAction::Refresh),
                 (KeyCode::Char('s'), _) => Some(AppAction::Random),
+                (KeyCode::Char('n'), _) => Some(AppAction::NextTrack),
+                (KeyCode::Char('b'), _) => Some(AppAction::PreviousTrack),
+                (KeyCode::Char('t'), _) => Some(AppAction::CycleSort),
+                (KeyCode::Char('m'), _) => Some(AppAction::CycleRepeat),
+                (KeyCode::Char('c'), _) => Some(AppAction::CycleTheme),
+                (KeyCode::Char('w'), _) => Some(AppAction::ToggleWaveform),
 
                 // Müzik kontrolleri
                 (KeyCode::Char('p'), _) => Some(AppAction::TogglePause),
