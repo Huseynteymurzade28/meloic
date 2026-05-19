@@ -1,14 +1,22 @@
 use rand::seq::SliceRandom;
-use ratatui::widgets::ListState;
 use ratatui::style::Color;
+use ratatui::widgets::ListState;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::library;
+use crate::metadata::{self, TrackMetadata};
+use crate::playlist;
+use crate::waveform::{WaveformService, WaveformState};
 
-/// Müzik çalma durumu
+const SEEK_SMALL: Duration = Duration::from_secs(5);
+const SEEK_LARGE: Duration = Duration::from_secs(30);
+const VOLUME_STEP: f32 = 0.05;
+const DEFAULT_VOLUME: f32 = 0.8;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackState {
     Stopped,
@@ -50,28 +58,62 @@ pub enum SortMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
+    Catppuccin,
+    TokyoNight,
+    Nord,
+    Gruvbox,
+    Solarized,
+    RosePine,
+    Dracula,
+    Material,
+    Monokai,
     Neon,
-    Sunset,
-    Forest,
-    Mono,
 }
 
 impl ThemeMode {
     pub fn next(self) -> Self {
         match self {
-            Self::Neon => Self::Sunset,
-            Self::Sunset => Self::Forest,
-            Self::Forest => Self::Mono,
-            Self::Mono => Self::Neon,
+            Self::Catppuccin => Self::TokyoNight,
+            Self::TokyoNight => Self::Nord,
+            Self::Nord => Self::Gruvbox,
+            Self::Gruvbox => Self::Solarized,
+            Self::Solarized => Self::RosePine,
+            Self::RosePine => Self::Dracula,
+            Self::Dracula => Self::Material,
+            Self::Material => Self::Monokai,
+            Self::Monokai => Self::Neon,
+            Self::Neon => Self::Catppuccin,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Catppuccin => "catppuccin",
+            Self::TokyoNight => "tokyo-night",
+            Self::Nord => "nord",
+            Self::Gruvbox => "gruvbox",
+            Self::Solarized => "solarized",
+            Self::RosePine => "rose-pine",
+            Self::Dracula => "dracula",
+            Self::Material => "material",
+            Self::Monokai => "monokai",
             Self::Neon => "neon",
-            Self::Sunset => "sunset",
-            Self::Forest => "forest",
-            Self::Mono => "mono",
+        }
+    }
+
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "catppuccin" => Some(Self::Catppuccin),
+            "tokyo-night" => Some(Self::TokyoNight),
+            "nord" => Some(Self::Nord),
+            "gruvbox" => Some(Self::Gruvbox),
+            "solarized" => Some(Self::Solarized),
+            "rose-pine" => Some(Self::RosePine),
+            "dracula" => Some(Self::Dracula),
+            "material" => Some(Self::Material),
+            "monokai" => Some(Self::Monokai),
+            "neon" => Some(Self::Neon),
+            _ => None,
         }
     }
 }
@@ -90,6 +132,87 @@ pub struct ThemePalette {
 impl ThemeMode {
     pub fn palette(self) -> ThemePalette {
         match self {
+            Self::Catppuccin => ThemePalette {
+                accent: Color::Rgb(203, 166, 247),
+                secondary: Color::Rgb(180, 190, 254),
+                success: Color::Rgb(166, 227, 161),
+                warning: Color::Rgb(250, 179, 135),
+                text: Color::Rgb(205, 214, 244),
+                muted: Color::Rgb(108, 112, 134),
+                selection_bg: Color::Rgb(69, 71, 90),
+            },
+            Self::TokyoNight => ThemePalette {
+                accent: Color::Rgb(187, 154, 247),
+                secondary: Color::Rgb(122, 162, 247),
+                success: Color::Rgb(158, 206, 106),
+                warning: Color::Rgb(224, 175, 104),
+                text: Color::Rgb(192, 202, 245),
+                muted: Color::Rgb(86, 95, 137),
+                selection_bg: Color::Rgb(54, 74, 130),
+            },
+            Self::Nord => ThemePalette {
+                accent: Color::Rgb(136, 192, 208),
+                secondary: Color::Rgb(129, 161, 193),
+                success: Color::Rgb(163, 190, 140),
+                warning: Color::Rgb(235, 203, 139),
+                text: Color::Rgb(236, 239, 244),
+                muted: Color::Rgb(76, 86, 106),
+                selection_bg: Color::Rgb(59, 66, 82),
+            },
+            Self::Gruvbox => ThemePalette {
+                accent: Color::Rgb(211, 134, 155),
+                secondary: Color::Rgb(131, 165, 152),
+                success: Color::Rgb(184, 187, 38),
+                warning: Color::Rgb(250, 189, 47),
+                text: Color::Rgb(235, 219, 178),
+                muted: Color::Rgb(124, 111, 100),
+                selection_bg: Color::Rgb(60, 56, 54),
+            },
+            Self::Solarized => ThemePalette {
+                accent: Color::Rgb(131, 148, 210),
+                secondary: Color::Rgb(42, 192, 182),
+                success: Color::Rgb(155, 190, 0),
+                warning: Color::Rgb(215, 165, 45),
+                text: Color::Rgb(175, 190, 192),
+                muted: Color::Rgb(110, 132, 140),
+                selection_bg: Color::Rgb(7, 54, 66),
+            },
+            Self::RosePine => ThemePalette {
+                accent: Color::Rgb(196, 167, 231),
+                secondary: Color::Rgb(156, 207, 216),
+                success: Color::Rgb(246, 193, 119),
+                warning: Color::Rgb(235, 188, 186),
+                text: Color::Rgb(224, 222, 244),
+                muted: Color::Rgb(110, 106, 134),
+                selection_bg: Color::Rgb(38, 35, 58),
+            },
+            Self::Dracula => ThemePalette {
+                accent: Color::Rgb(255, 121, 198),
+                secondary: Color::Rgb(189, 147, 249),
+                success: Color::Rgb(80, 250, 123),
+                warning: Color::Rgb(241, 250, 140),
+                text: Color::Rgb(248, 248, 242),
+                muted: Color::Rgb(98, 114, 164),
+                selection_bg: Color::Rgb(68, 71, 90),
+            },
+            Self::Material => ThemePalette {
+                accent: Color::Rgb(128, 203, 196),
+                secondary: Color::Rgb(130, 177, 255),
+                success: Color::Rgb(195, 232, 141),
+                warning: Color::Rgb(255, 203, 107),
+                text: Color::Rgb(238, 255, 255),
+                muted: Color::Rgb(84, 110, 122),
+                selection_bg: Color::Rgb(55, 71, 79),
+            },
+            Self::Monokai => ThemePalette {
+                accent: Color::Rgb(249, 38, 114),
+                secondary: Color::Rgb(102, 217, 232),
+                success: Color::Rgb(166, 226, 46),
+                warning: Color::Rgb(230, 219, 116),
+                text: Color::Rgb(248, 248, 242),
+                muted: Color::Rgb(117, 113, 94),
+                selection_bg: Color::Rgb(73, 72, 62),
+            },
             Self::Neon => ThemePalette {
                 accent: Color::Rgb(255, 120, 198),
                 secondary: Color::Rgb(120, 220, 255),
@@ -99,35 +222,27 @@ impl ThemeMode {
                 muted: Color::Rgb(120, 130, 150),
                 selection_bg: Color::Rgb(62, 76, 104),
             },
-            Self::Sunset => ThemePalette {
-                accent: Color::Rgb(255, 140, 90),
-                secondary: Color::Rgb(255, 208, 122),
-                success: Color::Rgb(255, 178, 120),
-                warning: Color::Rgb(255, 230, 160),
-                text: Color::Rgb(250, 238, 225),
-                muted: Color::Rgb(165, 134, 120),
-                selection_bg: Color::Rgb(96, 61, 54),
-            },
-            Self::Forest => ThemePalette {
-                accent: Color::Rgb(98, 196, 146),
-                secondary: Color::Rgb(151, 223, 185),
-                success: Color::Rgb(190, 255, 180),
-                warning: Color::Rgb(224, 220, 142),
-                text: Color::Rgb(226, 239, 228),
-                muted: Color::Rgb(108, 136, 118),
-                selection_bg: Color::Rgb(43, 69, 57),
-            },
-            Self::Mono => ThemePalette {
-                accent: Color::Rgb(220, 220, 220),
-                secondary: Color::Rgb(180, 180, 180),
-                success: Color::Rgb(245, 245, 245),
-                warning: Color::Rgb(210, 210, 210),
-                text: Color::Rgb(235, 235, 235),
-                muted: Color::Rgb(140, 140, 140),
-                selection_bg: Color::Rgb(70, 70, 70),
-            },
         }
     }
+}
+
+fn config_theme_path() -> std::path::PathBuf {
+    crate::playlist::config_dir().join("theme")
+}
+
+pub fn load_saved_theme() -> ThemeMode {
+    std::fs::read_to_string(config_theme_path())
+        .ok()
+        .and_then(|s| ThemeMode::from_label(s.trim()))
+        .unwrap_or(ThemeMode::Catppuccin)
+}
+
+pub fn save_theme(theme: ThemeMode) {
+    let path = config_theme_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, theme.label());
 }
 
 impl SortMode {
@@ -148,18 +263,26 @@ impl SortMode {
     }
 }
 
-/// Uygulama durumunu tutan ana struct
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewMode {
+    Normal,
+    Help,
+    Queue,
+    Info,
+}
+
 pub struct App {
     pub items: Vec<PathBuf>,
     pub state: ListState,
+    pub queue_state: ListState,
     pub show_help: bool,
-    pub filtered_items: Vec<(usize, PathBuf)>, // (original_index, path)
+    pub filtered_items: Vec<(usize, PathBuf)>,
     pub total_tracks: usize,
     pub current_view: ViewMode,
     pub playback_state: PlaybackState,
     pub current_track: Option<PathBuf>,
     pub sink: Option<Arc<Sink>>,
-    pub _stream: Option<OutputStream>, // _ ile başlıyor çünkü kullanmıyoruz ama yaşatmamız gerekiyor
+    pub _stream: Option<OutputStream>,
     pub stream_handle: Option<OutputStreamHandle>,
     pub scan_roots: Vec<PathBuf>,
     pub search_query: String,
@@ -170,20 +293,22 @@ pub struct App {
     pub status_message: String,
     pub last_error: Option<String>,
     pub waveform_hidden_tracks: HashSet<PathBuf>,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub enum ViewMode {
-    Normal,
-    Help,
+    pub volume: f32,
+    pub muted: bool,
+    pub volume_before_mute: f32,
+    pub queue: Vec<PathBuf>,
+    pub metadata_cache: HashMap<PathBuf, Option<TrackMetadata>>,
+    pub waveform: WaveformService,
+    pub album_art_cache: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 impl App {
-    /// Yeni bir App instance'ı oluştur
-    pub fn new(items: Vec<PathBuf>, scan_roots: Vec<PathBuf>) -> App {
+    pub fn new(items: Vec<PathBuf>, scan_roots: Vec<PathBuf>, initial_queue: Vec<PathBuf>) -> App {
         let total = items.len();
         let mut app = App {
             items: items.clone(),
             state: ListState::default(),
+            queue_state: ListState::default(),
             show_help: false,
             filtered_items: items.into_iter().enumerate().collect(),
             total_tracks: total,
@@ -198,24 +323,46 @@ impl App {
             is_searching: false,
             repeat_mode: RepeatMode::Off,
             sort_mode: SortMode::NameAsc,
-            theme_mode: ThemeMode::Neon,
+            theme_mode: load_saved_theme(),
             status_message: format!("Loaded {total} tracks"),
             last_error: None,
             waveform_hidden_tracks: HashSet::new(),
+            volume: DEFAULT_VOLUME,
+            muted: false,
+            volume_before_mute: DEFAULT_VOLUME,
+            queue: initial_queue,
+            metadata_cache: HashMap::new(),
+            waveform: WaveformService::new(),
+            album_art_cache: HashMap::new(),
         };
         app.update_filtered_items();
         app
     }
 
-    /// İlk öğeyi seç
     pub fn select_first(&mut self) {
         if !self.filtered_items.is_empty() {
             self.state.select(Some(0));
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
         }
     }
 
-    /// Sonraki öğeye geç (liste sonunda ise başa sar)
     pub fn next(&mut self) {
+        match self.current_view {
+            ViewMode::Queue => self.queue_next(),
+            _ => self.library_next(),
+        }
+    }
+
+    pub fn previous(&mut self) {
+        match self.current_view {
+            ViewMode::Queue => self.queue_previous(),
+            _ => self.library_previous(),
+        }
+    }
+
+    fn library_next(&mut self) {
         let i = match self.state.selected() {
             Some(i) => {
                 if i >= self.filtered_items.len().saturating_sub(1) {
@@ -227,10 +374,12 @@ impl App {
             None => 0,
         };
         self.state.select(Some(i));
+        if let Some(track) = self.get_selected() {
+            self.request_track_assets(&track);
+        }
     }
 
-    /// Önceki öğeye geç (liste başında ise sona sar)
-    pub fn previous(&mut self) {
+    fn library_previous(&mut self) {
         let i = match self.state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -242,40 +391,84 @@ impl App {
             None => 0,
         };
         self.state.select(Some(i));
+        if let Some(track) = self.get_selected() {
+            self.request_track_assets(&track);
+        }
     }
 
-    /// Sayfa sonraki (10 öğe)
+    fn queue_next(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let i = match self.queue_state.selected() {
+            Some(i) => {
+                if i + 1 >= self.queue.len() {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.queue_state.select(Some(i));
+    }
+
+    fn queue_previous(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let i = match self.queue_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.queue.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.queue_state.select(Some(i));
+    }
+
     pub fn next_page(&mut self) {
         if let Some(selected) = self.state.selected() {
             let new_index =
                 std::cmp::min(selected + 10, self.filtered_items.len().saturating_sub(1));
             self.state.select(Some(new_index));
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
         }
     }
 
-    /// Sayfa önceki (10 öğe)
     pub fn previous_page(&mut self) {
         if let Some(selected) = self.state.selected() {
             let new_index = selected.saturating_sub(10);
             self.state.select(Some(new_index));
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
         }
     }
 
-    /// Liste başına git
     pub fn go_to_top(&mut self) {
         if !self.filtered_items.is_empty() {
             self.state.select(Some(0));
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
         }
     }
 
-    /// Liste sonuna git
     pub fn go_to_bottom(&mut self) {
         if !self.filtered_items.is_empty() {
             self.state.select(Some(self.filtered_items.len() - 1));
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
         }
     }
 
-    /// Rastgele şarkı seç
     pub fn select_random(&mut self) {
         if !self.filtered_items.is_empty() {
             let mut rng = rand::thread_rng();
@@ -286,10 +479,12 @@ impl App {
                 .unwrap_or(0);
             self.state.select(Some(random_index));
             self.status_message = "Selected random track".to_string();
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
         }
     }
 
-    /// Yardım penceresini aç/kapat
     pub fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
         self.current_view = if self.show_help {
@@ -299,7 +494,40 @@ impl App {
         };
     }
 
-    /// Filtrelenmiş öğeleri güncelle (şu an sadece tüm öğeleri gösteriyor)
+    pub fn toggle_queue_view(&mut self) {
+        match self.current_view {
+            ViewMode::Queue => {
+                self.current_view = ViewMode::Normal;
+            }
+            _ => {
+                self.current_view = ViewMode::Queue;
+                if !self.queue.is_empty() && self.queue_state.selected().is_none() {
+                    self.queue_state.select(Some(0));
+                }
+            }
+        }
+    }
+
+    pub fn toggle_info_view(&mut self) {
+        self.current_view = match self.current_view {
+            ViewMode::Info => ViewMode::Normal,
+            _ => {
+                if let Some(track) = self.get_selected() {
+                    self.ensure_metadata(&track);
+                }
+                ViewMode::Info
+            }
+        };
+    }
+
+    pub fn in_popup_queue(&self) -> bool {
+        matches!(self.current_view, ViewMode::Queue)
+    }
+
+    pub fn in_popup_info(&self) -> bool {
+        matches!(self.current_view, ViewMode::Info)
+    }
+
     fn update_filtered_items(&mut self) {
         let previous_selection = self.get_selected();
         let query = self.search_query.to_lowercase();
@@ -312,7 +540,6 @@ impl App {
                 if query.is_empty() {
                     return true;
                 }
-
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .map(|name| name.to_lowercase().contains(&query))
@@ -358,7 +585,6 @@ impl App {
         self.state.select(Some(0));
     }
 
-    /// Kütüphaneyi yenile
     pub fn refresh(&mut self) {
         self.items = library::scan_music_roots(&self.scan_roots);
         self.total_tracks = self.items.len();
@@ -366,7 +592,6 @@ impl App {
         self.status_message = format!("Refreshed library: {} tracks", self.total_tracks);
     }
 
-    /// Seçili öğeyi döndür
     pub fn get_selected(&self) -> Option<PathBuf> {
         self.state
             .selected()
@@ -374,12 +599,10 @@ impl App {
             .map(|(_, path)| path.clone())
     }
 
-    /// Liste boş mu?
     pub fn is_empty(&self) -> bool {
         self.filtered_items.is_empty()
     }
 
-    /// Mevcut görünüm listesi
     pub fn get_display_items(&self) -> &Vec<(usize, PathBuf)> {
         &self.filtered_items
     }
@@ -394,8 +617,8 @@ impl App {
 
     pub fn start_search(&mut self) {
         self.is_searching = true;
-        self.status_message = "Search mode: type to filter, Enter to keep, Esc to clear"
-            .to_string();
+        self.status_message =
+            "Search mode: type to filter, Enter to keep, Esc to clear".to_string();
     }
 
     pub fn append_search_char(&mut self, ch: char) {
@@ -439,6 +662,7 @@ impl App {
 
     pub fn cycle_theme_mode(&mut self) {
         self.theme_mode = self.theme_mode.next();
+        save_theme(self.theme_mode);
         self.status_message = format!("Theme: {}", self.theme_mode.label());
     }
 
@@ -460,29 +684,8 @@ impl App {
         }
     }
 
-    pub fn waveform_points(&self, track: &Path, samples: usize) -> Vec<(f64, f64)> {
-        if samples == 0 {
-            return Vec::new();
-        }
-
-        let seed = track
-            .to_string_lossy()
-            .bytes()
-            .fold(0_u64, |acc, byte| acc.wrapping_mul(131).wrapping_add(byte as u64 + 17));
-        let phase = (seed % 360) as f64 / 57.2958;
-        let pulse = ((seed >> 7) % 11) as f64 + 3.0;
-        let shimmer = ((seed >> 13) % 17) as f64 + 5.0;
-
-        (0..samples)
-            .map(|index| {
-                let x = index as f64;
-                let base = x / samples as f64;
-                let y = ((base * pulse * std::f64::consts::TAU + phase).sin() * 0.72)
-                    + ((base * shimmer * std::f64::consts::PI + phase * 0.5).cos() * 0.28)
-                    + ((base * 3.0 + phase * 0.2).sin() * 0.12);
-                (x, y.clamp(-1.0, 1.0))
-            })
-            .collect()
+    pub fn waveform_state_for(&self, track: &Path) -> Option<&WaveformState> {
+        self.waveform.get(track)
     }
 
     pub fn scan_roots_summary(&self) -> String {
@@ -507,18 +710,15 @@ impl App {
         self.last_error = Some(message);
     }
 
-    /// Müzik çalmayı başlat
     pub fn play_track(&mut self, track: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-        use rodio::{Decoder, OutputStream, Sink};
+        use rodio::{Decoder, Sink};
         use std::fs::File;
         use std::io::BufReader;
 
-        // Eğer zaten bir şarkı çalıyorsa durdur
         if let Some(ref sink) = self.sink {
             sink.stop();
         }
 
-        // Stream'i ilk kez oluştur veya mevcut olanı kullan
         if self._stream.is_none() {
             let (stream, handle) = OutputStream::try_default()?;
             self._stream = Some(stream);
@@ -531,9 +731,13 @@ impl App {
             let source = Decoder::new(BufReader::new(file))?;
 
             sink.append(source);
+            sink.set_volume(if self.muted { 0.0 } else { self.volume });
 
             self.sink = Some(Arc::new(sink));
             let track_name = display_name(&track).to_string();
+            self.ensure_metadata(&track);
+            self.ensure_album_art(&track);
+            self.waveform.request(&track);
             self.current_track = Some(track);
             self.playback_state = PlaybackState::Playing;
             self.status_message = format!("Now playing {track_name}");
@@ -543,7 +747,6 @@ impl App {
         Ok(())
     }
 
-    /// Müziği duraklat/devam ettir
     pub fn toggle_pause(&mut self) {
         if let Some(ref sink) = self.sink {
             match self.playback_state {
@@ -557,14 +760,11 @@ impl App {
                     self.playback_state = PlaybackState::Playing;
                     self.status_message = "Playback resumed".to_string();
                 }
-                PlaybackState::Stopped => {
-                    // Şarkı durduysa hiçbir şey yapma
-                }
+                PlaybackState::Stopped => {}
             }
         }
     }
 
-    /// Müziği tamamen durdur
     pub fn stop_playback(&mut self) {
         if let Some(ref sink) = self.sink {
             sink.stop();
@@ -573,7 +773,6 @@ impl App {
         self.current_track = None;
         self.playback_state = PlaybackState::Stopped;
         self.status_message = "Playback stopped".to_string();
-        // Stream'i kapatmıyoruz, çünkü tekrar kullanabiliriz
     }
 
     pub fn play_selected(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -584,6 +783,12 @@ impl App {
     }
 
     pub fn play_next_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.queue.is_empty() {
+            let next = self.queue.remove(0);
+            self.fix_queue_state_after_removal(0);
+            return self.play_track(next);
+        }
+
         if self.filtered_items.is_empty() {
             return Ok(());
         }
@@ -627,9 +832,14 @@ impl App {
         self.play_selected()
     }
 
-    /// Müzik çalma durumunu kontrol et
     pub fn update_playback_status(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let track_finished = self.sink.as_ref().map(|sink| sink.empty()).unwrap_or(false);
+        self.waveform.poll();
+
+        let track_finished = self
+            .sink
+            .as_ref()
+            .map(|sink| sink.empty())
+            .unwrap_or(false);
 
         if !track_finished {
             return Ok(());
@@ -641,37 +851,310 @@ impl App {
                     self.play_track(current)?;
                 }
             }
-            RepeatMode::All => {
-                let next_index = self.current_track_index().map(|index| {
-                    if index + 1 < self.filtered_items.len() {
-                        index + 1
-                    } else {
-                        0
+            _ => {
+                if !self.queue.is_empty() {
+                    let next = self.queue.remove(0);
+                    self.fix_queue_state_after_removal(0);
+                    self.play_track(next)?;
+                } else if self.repeat_mode == RepeatMode::All {
+                    let next_index = self.current_track_index().map(|index| {
+                        if index + 1 < self.filtered_items.len() {
+                            index + 1
+                        } else {
+                            0
+                        }
+                    });
+                    if let Some(next_index) = next_index {
+                        self.state.select(Some(next_index));
+                        self.play_selected()?;
                     }
-                });
-
-                if let Some(next_index) = next_index {
-                    self.state.select(Some(next_index));
-                    self.play_selected()?;
+                } else {
+                    self.current_track = None;
+                    self.playback_state = PlaybackState::Stopped;
+                    self.sink = None;
+                    self.status_message = "Track finished".to_string();
                 }
-            }
-            RepeatMode::Off => {
-                self.current_track = None;
-                self.playback_state = PlaybackState::Stopped;
-                self.sink = None;
-                self.status_message = "Track finished".to_string();
             }
         }
 
         Ok(())
     }
+
+    // -------- Volume --------
+
+    pub fn volume_up(&mut self) {
+        self.muted = false;
+        self.volume = (self.volume + VOLUME_STEP).min(1.0);
+        self.apply_volume();
+        self.status_message = format!("Volume {}%", (self.volume * 100.0).round() as u32);
+    }
+
+    pub fn volume_down(&mut self) {
+        self.muted = false;
+        self.volume = (self.volume - VOLUME_STEP).max(0.0);
+        self.apply_volume();
+        self.status_message = format!("Volume {}%", (self.volume * 100.0).round() as u32);
+    }
+
+    pub fn toggle_mute(&mut self) {
+        if self.muted {
+            self.muted = false;
+            self.volume = self.volume_before_mute;
+            self.status_message = format!("Unmuted ({}%)", (self.volume * 100.0).round() as u32);
+        } else {
+            self.muted = true;
+            self.volume_before_mute = self.volume;
+            self.status_message = "Muted".to_string();
+        }
+        self.apply_volume();
+    }
+
+    fn apply_volume(&self) {
+        if let Some(ref sink) = self.sink {
+            sink.set_volume(if self.muted { 0.0 } else { self.volume });
+        }
+    }
+
+    pub fn volume_percent(&self) -> u32 {
+        if self.muted {
+            0
+        } else {
+            (self.volume * 100.0).round() as u32
+        }
+    }
+
+    // -------- Seek --------
+
+    pub fn seek_forward(&mut self) {
+        self.seek_by(SEEK_SMALL, true);
+    }
+
+    pub fn seek_backward(&mut self) {
+        self.seek_by(SEEK_SMALL, false);
+    }
+
+    pub fn seek_forward_large(&mut self) {
+        self.seek_by(SEEK_LARGE, true);
+    }
+
+    pub fn seek_backward_large(&mut self) {
+        self.seek_by(SEEK_LARGE, false);
+    }
+
+    fn seek_by(&mut self, delta: Duration, forward: bool) {
+        let Some(ref sink) = self.sink else {
+            self.status_message = "Nothing playing to seek".to_string();
+            return;
+        };
+        let pos = sink.get_pos();
+        let target = if forward {
+            pos.saturating_add(delta)
+        } else {
+            pos.saturating_sub(delta)
+        };
+        let total = self.current_total_duration();
+        let clamped = if let Some(total) = total {
+            if target >= total {
+                total.saturating_sub(Duration::from_millis(500))
+            } else {
+                target
+            }
+        } else {
+            target
+        };
+
+        match sink.try_seek(clamped) {
+            Ok(_) => {
+                self.status_message = format!(
+                    "Seek {} -> {}",
+                    metadata::format_duration(pos),
+                    metadata::format_duration(clamped)
+                );
+            }
+            Err(err) => {
+                self.status_message = format!("Seek not supported: {err}");
+            }
+        }
+    }
+
+    pub fn current_position(&self) -> Duration {
+        self.sink
+            .as_ref()
+            .map(|s| s.get_pos())
+            .unwrap_or_default()
+    }
+
+    pub fn current_total_duration(&self) -> Option<Duration> {
+        self.current_track
+            .as_ref()
+            .and_then(|track| self.metadata_cache.get(track))
+            .and_then(|m| m.as_ref())
+            .and_then(|m| m.duration)
+    }
+
+    // -------- Metadata --------
+
+    pub fn ensure_metadata(&mut self, track: &Path) {
+        if self.metadata_cache.contains_key(track) {
+            return;
+        }
+        let meta = metadata::read_metadata(track);
+        self.metadata_cache.insert(track.to_path_buf(), meta);
+    }
+
+    pub fn metadata_for(&self, track: &Path) -> Option<&TrackMetadata> {
+        self.metadata_cache.get(track).and_then(|m| m.as_ref())
+    }
+
+    pub fn ensure_album_art(&mut self, track: &Path) {
+        if self.album_art_cache.contains_key(track) {
+            return;
+        }
+        let art = metadata::read_album_art(track);
+        self.album_art_cache.insert(track.to_path_buf(), art);
+    }
+
+    pub fn album_art_for(&self, track: &Path) -> Option<&[u8]> {
+        self.album_art_cache.get(track)?.as_deref()
+    }
+
+    fn request_track_assets(&mut self, track: &Path) {
+        self.ensure_metadata(track);
+        self.ensure_album_art(track);
+        if self.is_waveform_enabled_for(track) {
+            self.waveform.request(track);
+        }
+    }
+
+    // -------- Queue / playlist --------
+
+    pub fn add_selected_to_queue(&mut self) {
+        let Some(track) = self.get_selected() else {
+            self.status_message = "No track selected".to_string();
+            return;
+        };
+        self.queue.push(track.clone());
+        self.status_message = format!(
+            "Queued {} (queue size {})",
+            display_name(&track),
+            self.queue.len()
+        );
+    }
+
+    pub fn add_filtered_to_queue(&mut self) {
+        let mut added = 0;
+        for (_, path) in self.filtered_items.clone() {
+            self.queue.push(path);
+            added += 1;
+        }
+        self.status_message = format!("Queued {} tracks (size {})", added, self.queue.len());
+    }
+
+    pub fn clear_queue(&mut self) {
+        let n = self.queue.len();
+        self.queue.clear();
+        self.queue_state.select(None);
+        self.status_message = format!("Cleared queue ({} tracks)", n);
+    }
+
+    pub fn remove_queue_selected(&mut self) {
+        let Some(i) = self.queue_state.selected() else {
+            return;
+        };
+        if i >= self.queue.len() {
+            return;
+        }
+        let removed = self.queue.remove(i);
+        self.fix_queue_state_after_removal(i);
+        self.status_message = format!("Removed {} from queue", display_name(&removed));
+    }
+
+    fn fix_queue_state_after_removal(&mut self, removed_index: usize) {
+        if self.queue.is_empty() {
+            self.queue_state.select(None);
+            return;
+        }
+        let new_index = removed_index.min(self.queue.len() - 1);
+        if let Some(sel) = self.queue_state.selected() {
+            if sel >= self.queue.len() {
+                self.queue_state.select(Some(new_index));
+            }
+        }
+    }
+
+    pub fn queue_play_selected(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(i) = self.queue_state.selected() else {
+            return Ok(());
+        };
+        if i >= self.queue.len() {
+            return Ok(());
+        }
+        let track = self.queue.remove(i);
+        self.fix_queue_state_after_removal(i);
+        self.current_view = ViewMode::Normal;
+        self.play_track(track)
+    }
+
+    pub fn save_queue(&mut self) {
+        let path = playlist::default_queue_path();
+        match playlist::write_m3u(&path, &self.queue) {
+            Ok(_) => {
+                self.status_message =
+                    format!("Saved {} tracks to {}", self.queue.len(), path.display());
+            }
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    pub fn load_queue(&mut self) {
+        let path = playlist::default_queue_path();
+        match playlist::parse_m3u(&path) {
+            Ok(tracks) => {
+                let n = tracks.len();
+                self.queue = tracks;
+                self.status_message = format!("Loaded {} tracks from {}", n, path.display());
+            }
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn queue_peek(&self, n: usize) -> &[PathBuf] {
+        let end = n.min(self.queue.len());
+        &self.queue[..end]
+    }
 }
 
-fn display_name(path: &Path) -> &str {
-    path.file_stem()
+fn display_name(path: &Path) -> String {
+    let stem = path
+        .file_stem()
         .and_then(|name| name.to_str())
         .or_else(|| path.file_name().and_then(|name| name.to_str()))
-        .unwrap_or("Unknown")
+        .unwrap_or("Unknown");
+    strip_video_id_suffix(stem)
+}
+
+fn strip_video_id_suffix(name: &str) -> String {
+    let trimmed = name.trim_end();
+    if !trimmed.ends_with(']') {
+        return name.to_string();
+    }
+    let Some(open) = trimmed.rfind('[') else {
+        return name.to_string();
+    };
+    let inner = &trimmed[open + 1..trimmed.len() - 1];
+    if inner.len() == 11
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        trimmed[..open].trim_end().to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 fn folder_name(path: &Path) -> String {
@@ -683,7 +1166,7 @@ fn folder_name(path: &Path) -> String {
 }
 
 pub fn track_display_name(path: &Path) -> String {
-    display_name(path).to_string()
+    display_name(path)
 }
 
 pub fn track_folder_name(path: &Path) -> String {

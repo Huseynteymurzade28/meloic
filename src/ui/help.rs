@@ -2,120 +2,172 @@ use crate::ui::app::App;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-/// Yardım ekranını çiz
-pub fn draw_help_screen(f: &mut Frame, _app: &App) {
-    let area = centered_rect(70, 80, f.size());
-
+pub fn draw_help_screen(f: &mut Frame, app: &App) {
+    let theme = app.theme_mode.palette();
+    let area = centered_rect(88, 92, f.size());
     f.render_widget(Clear, area);
 
-    let help_text = vec![
-        Line::from(vec![Span::styled(
-            "MELOIC - Music Player Help",
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            "  ♪  MELOIC — Keyboard Reference  ♪  ",
             Style::default()
-                .fg(Color::Rgb(120, 220, 255))
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "NAVIGATION",
-            Style::default()
-                .fg(Color::Rgb(255, 220, 120))
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  ↑/↓ or j/k     - Move up/down in track list"),
-        Line::from("  Page Up/Down   - Jump 10 tracks"),
-        Line::from("  Home/End       - Go to first/last track"),
-        Line::from("  g/G            - Go to top/bottom (vim style)"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "PLAYBACK",
-            Style::default()
-                .fg(Color::Rgb(120, 220, 170))
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Enter/Space    - Play selected track"),
-        Line::from("  p              - Pause/Resume current track"),
-        Line::from("  x              - Stop playback completely"),
-        Line::from("  s              - Shuffle (random track selection)"),
-        Line::from("  n / b          - Play next / previous track"),
-        Line::from("  m              - Cycle repeat mode (off/all/one)"),
-        Line::from("  w              - Toggle graph panel for selected track"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "LIBRARY",
-            Style::default()
-                .fg(Color::Rgb(255, 120, 198))
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  r or F5        - Refresh music library"),
-        Line::from("  /              - Start live search/filter mode"),
-        Line::from("  t              - Cycle sort mode"),
-        Line::from("  c              - Cycle UI theme"),
-        Line::from("  ?/h or F1      - Show/hide this help screen"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "SEARCH MODE",
-            Style::default().fg(Color::Rgb(255, 160, 120))
-            .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  Type           - Filter tracks instantly"),
-        Line::from("  Backspace      - Remove last character"),
-        Line::from("  Enter          - Keep current filter and exit search"),
-        Line::from("  Esc            - Clear filter and exit search"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "SYSTEM",
-            Style::default().fg(Color::Rgb(255, 160, 120))
-            .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  q or Esc       - Quit application"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "SUPPORTED FORMATS",
-            Style::default()
-                .fg(Color::Rgb(100, 150, 255))
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  MP3, FLAC, WAV, OGG, M4A, AAC"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "TIP: Meloic scans ~/Music, /Music, local Music/music folders, and the current directory",
-            Style::default().fg(Color::Rgb(150, 150, 150)),
-        )]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Press h, ? or F1 to close this help screen",
-            Style::default()
-                .fg(Color::Rgb(255, 255, 255))
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(Modifier::UNDERLINED),
-        )]),
-    ];
+        ))
+        .border_style(Style::default().fg(theme.accent));
+    let outer_inner = outer.inner(area);
+    f.render_widget(outer, area);
 
-    let help_widget = Paragraph::new(help_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Help & Controls ")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Rgb(120, 220, 255))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .border_style(Style::default().fg(Color::Rgb(255, 120, 198))),
-        )
-        .style(Style::default().fg(Color::Rgb(255, 255, 255)))
-        .alignment(Alignment::Left);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(2)])
+        .split(outer_inner);
 
-    f.render_widget(help_widget, area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+
+    let left_block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(theme.muted));
+    let left_inner = left_block.inner(cols[0]);
+    f.render_widget(left_block, cols[0]);
+
+    let left = Paragraph::new(build_left_column(theme))
+        .style(Style::default().fg(theme.text))
+        .wrap(Wrap { trim: false });
+    f.render_widget(left, left_inner);
+
+    let right = Paragraph::new(build_right_column(theme))
+        .style(Style::default().fg(theme.text))
+        .wrap(Wrap { trim: false });
+    f.render_widget(right, cols[1]);
+
+    let footer_line = Line::from(vec![
+        Span::styled("  ♪ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            "MP3  FLAC  WAV  OGG  M4A  AAC    ",
+            Style::default().fg(theme.muted),
+        ),
+        Span::styled(
+            "  Press h, ? or F1 to close  ",
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    let footer = Paragraph::new(footer_line).alignment(Alignment::Center);
+    f.render_widget(footer, rows[1]);
 }
 
-/// Ortalanmış rectangle hesapla
+fn section(title: &str, theme: crate::ui::app::ThemePalette) -> Line<'static> {
+    let title = title.to_string();
+    Line::from(vec![
+        Span::styled(
+            "  ",
+            Style::default().fg(theme.accent),
+        ),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
+    ])
+}
+
+fn divider(theme: crate::ui::app::ThemePalette) -> Line<'static> {
+    Line::from(Span::styled(
+        "  ─────────────────────────────────────",
+        Style::default().fg(theme.muted),
+    ))
+}
+
+fn key_line(keys: &str, desc: &str, theme: crate::ui::app::ThemePalette) -> Line<'static> {
+    let keys = keys.to_string();
+    let desc = desc.to_string();
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<12}", keys),
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc, Style::default().fg(theme.text)),
+    ])
+}
+
+fn blank() -> Line<'static> {
+    Line::from("")
+}
+
+fn build_left_column(theme: crate::ui::app::ThemePalette) -> Vec<Line<'static>> {
+    vec![
+        blank(),
+        section("NAVIGATION", theme),
+        divider(theme),
+        key_line("↑ ↓  j k", "Move selection up / down", theme),
+        key_line("PgUp / PgDn", "Jump 10 entries", theme),
+        key_line("Ctrl+u / Ctrl+d", "Jump 10 (vim style)", theme),
+        key_line("g  /  G", "First / last entry", theme),
+        key_line("Enter  Space", "Play highlighted track", theme),
+        key_line("/", "Live search — Esc to clear", theme),
+        blank(),
+        section("VOLUME", theme),
+        divider(theme),
+        key_line("+ / =", "Volume up 5%", theme),
+        key_line("- / _", "Volume down 5%", theme),
+        key_line("0", "Mute / unmute", theme),
+        blank(),
+        section("QUEUE & PLAYLISTS", theme),
+        divider(theme),
+        key_line("a", "Add selected track to queue", theme),
+        key_line("A", "Add all filtered tracks", theme),
+        key_line("Q", "Open queue manager popup", theme),
+        key_line("S  /  L", "Save / load queue (M3U)", theme),
+        key_line("d", "Remove track (inside popup)", theme),
+        key_line("c", "Clear queue (inside popup)", theme),
+        blank(),
+    ]
+}
+
+fn build_right_column(theme: crate::ui::app::ThemePalette) -> Vec<Line<'static>> {
+    vec![
+        blank(),
+        section("PLAYBACK", theme),
+        divider(theme),
+        key_line("p", "Pause / resume", theme),
+        key_line("x", "Stop playback", theme),
+        key_line("n  /  b", "Next / previous track", theme),
+        key_line("s", "Shuffle (random track)", theme),
+        key_line("m", "Cycle repeat: off → all → one", theme),
+        blank(),
+        section("SEEK", theme),
+        divider(theme),
+        key_line("→  /  ←", "Seek ±5 seconds", theme),
+        key_line("Shift+→  ←", "Seek ±30 seconds", theme),
+        blank(),
+        section("LIBRARY & DISPLAY", theme),
+        divider(theme),
+        key_line("r  /  F5", "Rescan music roots", theme),
+        key_line("t", "Cycle sort mode", theme),
+        key_line("c", "Cycle theme (10 themes)", theme),
+        key_line("i", "Track info popup", theme),
+        key_line("w", "Toggle waveform panel", theme),
+        key_line("?  h  F1", "Toggle this help screen", theme),
+        key_line("q  /  Esc", "Quit meloic", theme),
+        blank(),
+    ]
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)

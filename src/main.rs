@@ -1,5 +1,10 @@
 mod library;
+mod metadata;
+mod playlist;
 mod ui;
+mod waveform;
+
+use std::path::PathBuf;
 
 fn main() {
     let scan_roots = library::default_scan_roots();
@@ -16,7 +21,14 @@ fn main() {
         return;
     }
 
-    match ui::run_ui(&tracks, scan_roots) {
+    let initial_queue = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .filter(|p| playlist::is_playlist_file(p))
+        .and_then(|p| playlist::parse_m3u(&p).ok())
+        .unwrap_or_default();
+
+    match ui::run_ui(&tracks, scan_roots, initial_queue) {
         Ok(_) => {
             println!("👋 Exiting meloic. Goodbye!");
         }
