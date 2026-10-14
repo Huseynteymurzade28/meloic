@@ -23,12 +23,12 @@ Album art, waveform display, queue management, ten color themes and vim-style na
 - **Real album covers.** In terminals with a graphics protocol (kitty, Sixel) covers are drawn at full pixel resolution. Other terminals use a color halfblock fallback.
 - **Full-size cover view.** Press `v` to show the cover at full size, with track details and progress.
 - **Waveform display.** Each track is rendered as a bar waveform, with playback progress highlighted.
-- **10 themes:** Catppuccin, Tokyo Night, Nord, Gruvbox, Solarized, Rosé Pine, Dracula, Material, Monokai and Neon. The selected theme persists between sessions.
+- **10 themes:** Catppuccin, Tokyo Night, Nord, Gruvbox, Solarized, Rosé Pine, Dracula, Material, Monokai and Neon.
 - **Responsive layout.** The sidebar is hidden automatically on narrow terminals.
 
 **Playback**
 - MP3, FLAC, WAV, OGG, M4A and AAC
-- Seek, volume, mute, repeat (off / all / one) and shuffle
+- Seek, volume, mute, repeat (off / all / one) and shuffle, all remembered between sessions
 - Automatic advance to the next queued or listed track
 
 **Library**
@@ -168,8 +168,21 @@ meloic saves its state in `~/.config/meloic/`:
 
 | File | Contents |
 | --- | --- |
-| `theme` | The last theme you picked |
+| `settings` | Theme, volume, mute, shuffle, repeat and sort mode, saved whenever they change |
 | `queue.m3u` | The queue saved with `S`, loaded with `L` |
+
+`settings` is a plain `key = value` file and can be edited by hand:
+
+```ini
+theme = catppuccin
+volume = 80
+muted = false
+shuffle = false
+repeat = off        # off, all, one
+sort = name-asc     # name-asc, name-desc, folder
+```
+
+Invalid values are ignored and fall back to defaults. Settings from older versions (the `theme` file) are migrated automatically.
 
 ## Demo library
 

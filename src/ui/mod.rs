@@ -2,6 +2,7 @@ pub mod app;
 pub mod cover;
 pub mod events;
 pub mod help;
+pub mod settings;
 pub mod widgets;
 
 use crossterm::{
