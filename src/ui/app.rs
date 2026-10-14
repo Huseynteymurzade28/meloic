@@ -13,12 +13,12 @@ use crate::library;
 use crate::metadata::{self, TrackMetadata};
 use crate::playlist;
 use crate::ui::cover::CoverRenderer;
+use crate::ui::settings::Settings;
 use crate::waveform::{WaveformService, WaveformState};
 
 const SEEK_SMALL: Duration = Duration::from_secs(5);
 const SEEK_LARGE: Duration = Duration::from_secs(30);
 const VOLUME_STEP: f32 = 0.05;
-const DEFAULT_VOLUME: f32 = 0.8;
 pub const LIST_ROW_HEIGHT: u16 = 2;
 const STATUS_TTL: Duration = Duration::from_secs(5);
 
@@ -58,6 +58,15 @@ impl RepeatMode {
             Self::Off => "off",
             Self::All => "all",
             Self::One => "one",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "off" => Some(Self::Off),
+            "all" => Some(Self::All),
+            "one" => Some(Self::One),
+            _ => None,
         }
     }
 }
@@ -239,25 +248,6 @@ impl ThemeMode {
     }
 }
 
-fn config_theme_path() -> std::path::PathBuf {
-    crate::playlist::config_dir().join("theme")
-}
-
-pub fn load_saved_theme() -> ThemeMode {
-    std::fs::read_to_string(config_theme_path())
-        .ok()
-        .and_then(|s| ThemeMode::from_label(s.trim()))
-        .unwrap_or(ThemeMode::Catppuccin)
-}
-
-pub fn save_theme(theme: ThemeMode) {
-    let path = config_theme_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&path, theme.label());
-}
-
 impl SortMode {
     pub fn next(self) -> Self {
         match self {
@@ -272,6 +262,24 @@ impl SortMode {
             Self::NameAsc => "name a-z",
             Self::NameDesc => "name z-a",
             Self::Folder => "folder",
+        }
+    }
+
+    /// Stable identifier used in the settings file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::NameAsc => "name-asc",
+            Self::NameDesc => "name-desc",
+            Self::Folder => "folder",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "name-asc" => Some(Self::NameAsc),
+            "name-desc" => Some(Self::NameDesc),
+            "folder" => Some(Self::Folder),
+            _ => None,
         }
     }
 }
@@ -329,6 +337,7 @@ impl App {
         picker: Option<ratatui_image::picker::Picker>,
     ) -> App {
         let total = items.len();
+        let settings = Settings::load();
         let mut app = App {
             items: items.clone(),
             state: ListState::default(),
@@ -345,22 +354,22 @@ impl App {
             scan_roots,
             search_query: String::new(),
             is_searching: false,
-            repeat_mode: RepeatMode::Off,
-            sort_mode: SortMode::NameAsc,
-            theme_mode: load_saved_theme(),
+            repeat_mode: settings.repeat,
+            sort_mode: settings.sort,
+            theme_mode: settings.theme,
             status_message: format!("Loaded {total} tracks"),
             last_error: None,
             waveform_hidden_tracks: HashSet::new(),
-            volume: DEFAULT_VOLUME,
-            muted: false,
-            volume_before_mute: DEFAULT_VOLUME,
+            volume: settings.volume,
+            muted: settings.muted,
+            volume_before_mute: settings.volume,
             queue: initial_queue,
             metadata_cache: HashMap::new(),
             waveform: WaveformService::new(),
             album_art_cache: HashMap::new(),
             covers: RefCell::new(CoverRenderer::new(picker)),
             hit_areas: Cell::new(HitAreas::default()),
-            shuffle: false,
+            shuffle: settings.shuffle,
             started_at: Instant::now(),
             status_seen: RefCell::new((String::new(), Instant::now())),
         };
@@ -764,22 +773,38 @@ impl App {
         self.sort_mode = self.sort_mode.next();
         self.update_filtered_items();
         self.status_message = format!("Sort: {}", self.sort_mode.label());
+        self.save_settings();
     }
 
     pub fn cycle_repeat_mode(&mut self) {
         self.repeat_mode = self.repeat_mode.next();
         self.status_message = format!("Repeat: {}", self.repeat_mode.label());
+        self.save_settings();
     }
 
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
         self.status_message = format!("Shuffle: {}", if self.shuffle { "on" } else { "off" });
+        self.save_settings();
     }
 
     pub fn cycle_theme_mode(&mut self) {
         self.theme_mode = self.theme_mode.next();
-        save_theme(self.theme_mode);
         self.status_message = format!("Theme: {}", self.theme_mode.label());
+        self.save_settings();
+    }
+
+    fn save_settings(&self) {
+        Settings {
+            theme: self.theme_mode,
+            // While muted, `volume` still holds the level to restore on unmute.
+            volume: self.volume,
+            muted: self.muted,
+            shuffle: self.shuffle,
+            repeat: self.repeat_mode,
+            sort: self.sort_mode,
+        }
+        .save();
     }
 
     pub fn is_waveform_enabled_for(&self, track: &Path) -> bool {
@@ -1031,6 +1056,7 @@ impl App {
     }
 
     fn apply_volume(&self) {
+        self.save_settings();
         if let Some(ref sink) = self.sink {
             sink.set_volume(if self.muted { 0.0 } else { self.volume });
         }
