@@ -1,229 +1,306 @@
 use crate::metadata::{self, TrackMetadata};
-use crate::ui::app::{App, PlaybackState, ViewMode, track_display_name, track_folder_name};
+use crate::ui::app::{
+    App, LIST_ROW_HEIGHT, PlaybackState, ThemePalette, ViewMode, track_display_name,
+    track_folder_name,
+};
+use crate::ui::cover::CoverSlot;
 use crate::ui::help::draw_help_screen;
 use crate::waveform::WaveformState;
-use image::GenericImageView;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    symbols,
     text::{Line, Span},
-    widgets::{
-        Axis, Block, Borders, Chart, Clear, Dataset, Gauge, GraphType, LineGauge, List, ListItem,
-        Paragraph, Wrap,
-    },
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
 };
 use std::fs;
 use std::path::Path;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Below this width the sidebar is hidden and the library takes the full body.
+const SIDEBAR_MIN_WIDTH: u16 = 100;
+const BAR_GLYPHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const EQ_FRAMES: [&str; 8] = ["▁▃▅", "▂▅▃", "▃▇▂", "▅▃▆", "▇▂▄", "▅▄▇", "▃▆▅", "▂▇▃"];
 
 pub fn draw_ui(f: &mut Frame, app: &mut App) {
+    draw_main_screen(f, app);
     match app.current_view {
-        ViewMode::Help => {
-            draw_main_screen(f, app);
-            draw_help_screen(f, app);
-        }
-        ViewMode::Queue => {
-            draw_main_screen(f, app);
-            draw_queue_popup(f, app);
-        }
-        ViewMode::Info => {
-            draw_main_screen(f, app);
-            draw_info_popup(f, app);
-        }
-        ViewMode::Normal => draw_main_screen(f, app),
+        ViewMode::Help => draw_help_screen(f, app),
+        ViewMode::Queue => draw_queue_popup(f, app),
+        ViewMode::Info => draw_info_popup(f, app),
+        ViewMode::Cover => draw_cover_popup(f, app),
+        ViewMode::Normal => {}
     }
 }
 
 fn draw_main_screen(f: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
-        .constraints(
-            [
-                Constraint::Length(4),
-                Constraint::Min(10),
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ]
-            .as_ref(),
-        )
+        .horizontal_margin(1)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(4),
+            Constraint::Length(1),
+        ])
         .split(f.size());
 
-    draw_header_panel(f, main_chunks[0], app);
+    draw_header(f, main_chunks[0], app);
 
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(main_chunks[1]);
+    if main_chunks[1].width >= SIDEBAR_MIN_WIDTH {
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(main_chunks[1]);
+        draw_library(f, body_chunks[0], app);
+        draw_sidebar(f, body_chunks[1], app);
+    } else {
+        draw_library(f, main_chunks[1], app);
+    }
 
-    draw_enhanced_music_list(f, body_chunks[0], app);
-    draw_sidebar(f, body_chunks[1], app);
-
-    draw_progress_panel(f, main_chunks[2], app);
-    draw_status_bar(f, main_chunks[3], app);
+    draw_player_bar(f, main_chunks[2], app);
+    draw_footer(f, main_chunks[3], app);
 }
 
-fn draw_header_panel(f: &mut Frame, area: Rect, app: &App) {
-    let theme = app.theme_mode.palette();
-    let header_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Length(26),
-                Constraint::Min(28),
-                Constraint::Length(42),
-            ]
-            .as_ref(),
-        )
-        .split(area);
+// ---------------------------------------------------------------- helpers
 
-    let title = Paragraph::new(vec![Line::from(vec![
+fn panel<'a>(title: impl Into<String>, color: Color) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .padding(Padding::horizontal(1))
+        .title(Span::styled(
+            format!(" {} ", title.into()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+}
+
+fn text_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// Truncate `text` to `max` columns, ending with an ellipsis when cut.
+fn fit(text: &str, max: usize) -> String {
+    if text_width(text) <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if width + w > max - 1 {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Join left and right spans with padding so the right part hugs `width`.
+fn spread<'a>(mut left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: usize) -> Line<'a> {
+    let used: usize = left.iter().chain(&right).map(|s| s.width()).sum();
+    left.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    left.extend(right);
+    Line::from(left)
+}
+
+fn eq_glyph(app: &App) -> &'static str {
+    match app.playback_state {
+        PlaybackState::Playing => {
+            let frame = app.started_at.elapsed().as_millis() / 150;
+            EQ_FRAMES[frame as usize % EQ_FRAMES.len()]
+        }
+        PlaybackState::Paused => "▁▁▁",
+        PlaybackState::Stopped => "   ",
+    }
+}
+
+fn track_title(app: &App, path: &Path) -> String {
+    app.metadata_for(path)
+        .and_then(|m| m.title.clone())
+        .unwrap_or_else(|| track_display_name(path))
+}
+
+fn track_artist(app: &App, path: &Path) -> Option<String> {
+    app.metadata_for(path).and_then(|m| m.artist.clone())
+}
+
+fn key_hint<'a>(key: &'a str, label: &'a str, theme: ThemePalette) -> Vec<Span<'a>> {
+    vec![
         Span::styled(
-            "meloic ",
+            key,
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {label}  "), Style::default().fg(theme.muted)),
+    ]
+}
+
+// ---------------------------------------------------------------- header
+
+fn draw_header(f: &mut Frame, area: Rect, app: &App) {
+    let theme = app.theme_mode.palette();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.muted));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let badge = |icon: &'static str, label: String, active: bool| {
+        let color = if active { theme.accent } else { theme.muted };
+        vec![
+            Span::styled(format!("{icon} "), Style::default().fg(color)),
+            Span::styled(
+                label,
+                Style::default().fg(if active { theme.text } else { theme.muted }),
+            ),
+            Span::raw("   "),
+        ]
+    };
+
+    let mut right: Vec<Span> = Vec::new();
+    right.extend(badge("⇄", "shuffle".into(), app.shuffle));
+    right.extend(badge(
+        "↻",
+        app.repeat_mode.label().into(),
+        app.repeat_mode != crate::ui::app::RepeatMode::Off,
+    ));
+    right.extend(badge("⇅", app.sort_mode.label().into(), true));
+    right.push(Span::styled("◐ ", Style::default().fg(theme.accent)));
+    right.push(Span::styled(
+        app.theme_mode.label(),
+        Style::default().fg(theme.secondary),
+    ));
+    right.push(Span::raw(" "));
+
+    let mut left = vec![
+        Span::styled(
+            " ♫ meloic",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("music dashboard", Style::default().fg(theme.secondary)),
-    ])])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.accent)),
-    )
-    .alignment(Alignment::Center);
-    f.render_widget(title, header_chunks[0]);
-
-    let center = Paragraph::new(Line::from(vec![
-        Span::styled("Filter ", Style::default().fg(theme.muted)),
-        Span::styled(
-            if app.search_query.is_empty() {
-                "all tracks".to_string()
-            } else {
-                app.search_query.to_string()
-            },
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if app.is_searching {
-                "  [searching]"
-            } else {
-                ""
-            },
-            Style::default().fg(theme.warning),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Library View ")
-            .border_style(Style::default().fg(theme.muted)),
-    );
-    f.render_widget(center, header_chunks[1]);
-
-    let vol_label = if app.muted {
-        "muted".to_string()
-    } else {
-        format!("{}%", app.volume_percent())
-    };
-
-    let stats_lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{} shown / {} total  ", app.visible_track_count(), app.total_tracks),
-                Style::default().fg(theme.text),
-            ),
-            Span::styled(
-                format!("queue {}", app.queue_len()),
-                Style::default().fg(theme.warning),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("sort ", Style::default().fg(theme.muted)),
-            Span::styled(app.sort_mode.label(), Style::default().fg(theme.secondary)),
-            Span::styled("  repeat ", Style::default().fg(theme.muted)),
-            Span::styled(app.repeat_mode.label(), Style::default().fg(theme.secondary)),
-            Span::styled("  vol ", Style::default().fg(theme.muted)),
-            Span::styled(
-                vol_label,
-                Style::default()
-                    .fg(if app.muted { theme.warning } else { theme.success })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("theme ", Style::default().fg(theme.muted)),
-            Span::styled("● ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-            Span::styled(app.theme_mode.label(), Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-            Span::styled("  roots ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{}", app.scan_roots.len()),
-                Style::default().fg(theme.text),
-            ),
-        ]),
+        Span::styled("  │  ", Style::default().fg(theme.muted)),
     ];
 
-    let stats = Paragraph::new(stats_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Session ")
-                .border_style(Style::default().fg(theme.success)),
-        )
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
-    f.render_widget(stats, header_chunks[2]);
+    if app.is_searching || !app.search_query.is_empty() {
+        left.push(Span::styled("/ ", Style::default().fg(theme.warning)));
+        left.push(Span::styled(
+            app.search_query.clone(),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ));
+        if app.is_searching {
+            left.push(Span::styled("▏", Style::default().fg(theme.accent)));
+        }
+        left.push(Span::styled(
+            format!("  {} / {}", app.visible_track_count(), app.total_tracks),
+            Style::default().fg(theme.muted),
+        ));
+    } else {
+        left.push(Span::styled(
+            format!("{} tracks", app.total_tracks),
+            Style::default().fg(theme.text),
+        ));
+        left.push(Span::styled(
+            "   press / to search",
+            Style::default().fg(theme.muted),
+        ));
+    }
+
+    let width = inner.width as usize;
+    let right_width: usize = right.iter().map(|s| s.width()).sum();
+    let line = if left.iter().map(|s| s.width()).sum::<usize>() + right_width + 2 <= width {
+        spread(left, right, width)
+    } else {
+        Line::from(left)
+    };
+    f.render_widget(Paragraph::new(line), inner);
 }
 
-fn draw_enhanced_music_list(f: &mut Frame, area: Rect, app: &mut App) {
+// ---------------------------------------------------------------- library
+
+fn draw_library(f: &mut Frame, area: Rect, app: &mut App) {
     let theme = app.theme_mode.palette();
+    let title = if app.search_query.is_empty() {
+        "Library".to_string()
+    } else {
+        format!("Library · {}", app.search_query)
+    };
+    let block = panel(title, theme.secondary).title(
+        ratatui::widgets::block::Title::from(Span::styled(
+            format!(
+                " {}/{} ",
+                app.selected_track_number(),
+                app.visible_track_count()
+            ),
+            Style::default().fg(theme.muted),
+        ))
+        .alignment(Alignment::Right),
+    );
+    let inner = block.inner(area);
+
     if app.is_empty() {
-        let empty_msg =
-            "No tracks match the current view.\n\nAdd audio files or clear the active filter with Esc.";
-
-        let empty_widget = Paragraph::new(empty_msg)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Library ")
-                    .style(Style::default().fg(theme.accent)),
-            )
-            .style(Style::default().fg(theme.warning))
-            .alignment(Alignment::Center);
-
-        f.render_widget(empty_widget, area);
+        let empty = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "No tracks match the current view",
+                Style::default().fg(theme.warning),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Esc clears the filter · r rescans the library",
+                Style::default().fg(theme.muted),
+            )),
+        ])
+        .block(block)
+        .alignment(Alignment::Center);
+        f.render_widget(empty, area);
         return;
     }
 
-    let display_items = app.get_display_items().clone();
-    let selected = app.state.selected();
+    // Load tags around the viewport so rows can show artist and duration.
+    let visible_rows = (inner.height / LIST_ROW_HEIGHT) as usize + 1;
+    let anchor = app.state.selected().unwrap_or(0);
+    app.ensure_metadata_range(
+        app.state.offset().min(anchor.saturating_sub(visible_rows)),
+        visible_rows * 2 + 1,
+    );
 
-    let items: Vec<ListItem> = display_items
+    let width = inner.width as usize;
+    let selected = app.state.selected();
+    let eq = eq_glyph(app);
+
+    let items: Vec<ListItem> = app
+        .get_display_items()
         .iter()
         .enumerate()
-        .map(|(display_idx, (_, path))| {
-            let filename = track_display_name(path);
-            let parent = track_folder_name(path);
-            let is_selected = Some(display_idx) == selected;
+        .map(|(idx, (_, path))| {
+            let is_selected = Some(idx) == selected;
             let is_playing = app.current_track.as_ref() == Some(path);
-            let extension = track_extension(path);
+            let meta = app.metadata_for(path);
 
-            let marker = match (is_playing, is_selected) {
-                (true, _) => " ▶ ",
-                (false, true) => " › ",
-                _ => "   ",
-            };
-
-            let number_style = if is_selected {
-                Style::default()
-                    .fg(theme.secondary)
-                    .add_modifier(Modifier::BOLD)
+            let (marker, marker_color) = if is_playing {
+                (eq.to_string(), theme.success)
+            } else if is_selected {
+                ("  ›".to_string(), theme.accent)
             } else {
-                Style::default().fg(theme.muted)
+                (format!("{:>3}", idx + 1), theme.muted)
             };
 
-            let filename_style = if is_playing {
+            let duration = meta
+                .and_then(|m| m.duration)
+                .map(metadata::format_duration)
+                .unwrap_or_default();
+
+            let title_style = if is_playing {
                 Style::default()
                     .fg(theme.success)
                     .add_modifier(Modifier::BOLD)
@@ -233,264 +310,231 @@ fn draw_enhanced_music_list(f: &mut Frame, area: Rect, app: &mut App) {
                 Style::default().fg(theme.text)
             };
 
-            let meta = app.metadata_for(path);
-            let artist = meta.map(|m| m.display_artist().to_string()).unwrap_or_default();
-            let duration_label = meta
-                .and_then(|m| m.duration)
-                .map(metadata::format_duration)
-                .unwrap_or_default();
+            let title_room = width.saturating_sub(6 + text_width(&duration) + 1);
+            let line1 = spread(
+                vec![
+                    Span::styled(format!("{marker}  "), Style::default().fg(marker_color)),
+                    Span::styled(fit(&track_title(app, path), title_room), title_style),
+                ],
+                vec![
+                    Span::styled(duration, Style::default().fg(theme.muted)),
+                    Span::raw(" "),
+                ],
+                width,
+            );
 
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(format!("{:3}. ", display_idx + 1), number_style),
+            let artist = track_artist(app, path);
+            let album = meta
+                .and_then(|m| m.album.clone())
+                .unwrap_or_else(|| track_folder_name(path));
+            let subtitle = match artist {
+                Some(artist) => format!("{artist} · {album}"),
+                None => album,
+            };
+            let ext = track_extension(path);
+            let sub_room = width.saturating_sub(5 + text_width(&ext) + 1);
+            let line2 = spread(
+                vec![
+                    Span::raw("     "),
                     Span::styled(
-                        format!("{} ", marker),
-                        Style::default().fg(if is_playing {
-                            theme.success
-                        } else if is_selected {
+                        fit(&subtitle, sub_room),
+                        Style::default().fg(if is_selected {
                             theme.accent
                         } else {
                             theme.muted
                         }),
                     ),
-                    Span::styled(filename, filename_style),
-                ]),
-                Line::from(vec![
-                    Span::styled(parent, Style::default().fg(theme.muted)),
-                    Span::styled("  |  ", Style::default().fg(theme.muted)),
-                    Span::styled(extension, Style::default().fg(theme.secondary)),
-                    Span::styled("  |  ", Style::default().fg(theme.muted)),
-                    Span::styled(artist, Style::default().fg(theme.accent)),
-                    Span::styled("  ", Style::default()),
-                    Span::styled(duration_label, Style::default().fg(theme.warning)),
-                ]),
-            ])
+                ],
+                vec![
+                    Span::styled(ext, Style::default().fg(theme.muted)),
+                    Span::raw(" "),
+                ],
+                width,
+            );
+
+            ListItem::new(vec![line1, line2])
         })
         .collect();
 
-    let list_title = if app.search_query.is_empty() {
-        " Library ".to_string()
-    } else {
-        format!(" Library / {} ", app.search_query)
-    };
-
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(list_title)
-                .border_style(Style::default().fg(theme.secondary)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(theme.selection_bg)
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-
+        .block(block)
+        .highlight_style(Style::default().bg(theme.selection_bg));
     f.render_stateful_widget(list, area, &mut app.state);
+
+    let mut hit = app.hit_areas.get();
+    hit.list = inner;
+    hit.list_offset = app.state.offset();
+    app.hit_areas.set(hit);
 }
 
+// ---------------------------------------------------------------- sidebar
+
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    // Give the cover roughly half the sidebar; the waveform takes what is left.
+    let now_height = (area.height * 55 / 100).clamp(12, 26);
+    let show_queue = area.height >= now_height + 8 + 6;
+    let mut constraints = vec![Constraint::Length(now_height)];
+    if show_queue {
+        constraints.push(Constraint::Length(8));
+    }
+    constraints.push(Constraint::Min(5));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(18),
-            Constraint::Length(8),
-            Constraint::Min(6),
-            Constraint::Length(7),
-        ])
+        .constraints(constraints)
         .split(area);
 
     draw_now_playing(f, chunks[0], app);
-    draw_queue_preview(f, chunks[1], app);
-    draw_waveform_panel(f, chunks[2], app);
-    draw_quick_keys(f, chunks[3], app);
+    if show_queue {
+        draw_queue_preview(f, chunks[1], app);
+    }
+    draw_waveform_panel(f, chunks[chunks.len() - 1], app);
 }
 
 fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme_mode.palette();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Now Playing ")
-        .border_style(Style::default().fg(theme.success));
+    let title = if app.current_track.is_some() {
+        "Now Playing"
+    } else {
+        "Selected"
+    };
+    let block = panel(title, theme.success).title(
+        ratatui::widgets::block::Title::from(Span::styled(
+            " v enlarge ",
+            Style::default().fg(theme.muted),
+        ))
+        .alignment(Alignment::Right),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Resolve album art bytes (current track preferred, then selected)
-    let selected_path = app.get_selected();
-    let art_bytes: Option<&[u8]> = app
-        .current_track
-        .as_deref()
-        .and_then(|t| app.album_art_for(t))
-        .or_else(|| selected_path.as_deref().and_then(|t| app.album_art_for(t)));
-
-    let art_width = if art_bytes.is_some() && inner.width > 30 && inner.height > 2 {
-        let candidate = (inner.height * 2).min(inner.width / 2).min(40);
-        candidate
-    } else {
-        0
+    // Current track preferred, otherwise whatever is highlighted.
+    let Some(track) = app.current_track.clone().or_else(|| app.get_selected()) else {
+        return;
     };
 
-    if art_width > 0 {
-        let splits = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(art_width), Constraint::Length(1), Constraint::Min(5)])
-            .split(inner);
+    if inner.width < 30 || inner.height < 3 {
+        draw_track_details(f, inner, app, &track, theme);
+        return;
+    }
 
-        if let Some(data) = art_bytes {
-            draw_halfblock_art(f, splits[0], data);
-        }
+    // Square cover on the left (up to ~55% of the width), details beside it.
+    let cover_box = Rect {
+        width: inner.width * 55 / 100,
+        ..inner
+    };
+    let art = Rect {
+        x: inner.x,
+        ..app.covers.borrow().square_in(cover_box)
+    };
+    draw_cover(f, art, app, CoverSlot::Sidebar, &track);
 
-        draw_track_info_panel(f, splits[2], app, theme);
-    } else {
-        draw_track_info_panel(f, inner, app, theme);
+    let info_x = art.x + art.width + 2;
+    let info_area = Rect {
+        x: info_x,
+        width: inner.right().saturating_sub(info_x),
+        ..inner
+    };
+    draw_track_details(f, info_area, app, &track, theme);
+}
+
+fn draw_cover(f: &mut Frame, area: Rect, app: &App, slot: CoverSlot, track: &Path) {
+    let drawn = app
+        .album_art_for(track)
+        .is_some_and(|data| app.covers.borrow_mut().render(f, area, slot, track, data));
+    if !drawn {
+        draw_art_placeholder(f, area, app.theme_mode.palette());
     }
 }
 
-fn draw_halfblock_art(f: &mut Frame, area: Rect, data: &[u8]) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let Ok(img) = image::load_from_memory(data) else {
-        return;
-    };
-    let cols = area.width as u32;
-    let rows = area.height as u32;
-    let pixel_rows = rows * 2;
-    let img = img.resize_to_fill(cols, pixel_rows, image::imageops::FilterType::Triangle);
-    let (actual_w, _) = img.dimensions();
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for row in 0..rows {
-        let mut spans = Vec::new();
-        for col in 0..actual_w {
-            let top = img.get_pixel(col, row * 2);
-            let bot_y = row * 2 + 1;
-            let bot = img.get_pixel(col, bot_y.min(pixel_rows - 1));
-            let fg = Color::Rgb(top[0], top[1], top[2]);
-            let bg = Color::Rgb(bot[0], bot[1], bot[2]);
-            spans.push(Span::styled("▀", Style::default().fg(fg).bg(bg)));
-        }
-        lines.push(Line::from(spans));
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-fn draw_track_info_panel(
-    f: &mut Frame,
-    area: Rect,
-    app: &App,
-    theme: crate::ui::app::ThemePalette,
-) {
-    let lines = if let Some(track) = &app.current_track {
-        let status_icon = match app.playback_state {
-            PlaybackState::Playing => "▶",
-            PlaybackState::Paused => "⏸",
-            PlaybackState::Stopped => "⏹",
-        };
-        let status_color = match app.playback_state {
-            PlaybackState::Playing => theme.success,
-            PlaybackState::Paused => theme.warning,
-            PlaybackState::Stopped => theme.muted,
-        };
-        let meta = app.metadata_for(track);
-        let title = meta
-            .and_then(|m| m.title.clone())
-            .unwrap_or_else(|| track_display_name(track));
-        let artist = meta
-            .map(|m| m.display_artist().to_string())
-            .unwrap_or_else(|| "Unknown artist".to_string());
-        let album = meta
-            .map(|m| m.display_album().to_string())
-            .unwrap_or_else(|| "Unknown album".to_string());
-        let duration = meta
-            .and_then(|m| m.duration)
-            .map(metadata::format_duration)
-            .unwrap_or_default();
-
-        vec![
-            Line::from(vec![
-                Span::styled(
-                    format!(" {} ", status_icon),
-                    Style::default()
-                        .fg(status_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("vol ", Style::default().fg(theme.muted)),
-                Span::styled(
-                    if app.muted {
-                        "MUTE".to_string()
-                    } else {
-                        format!("{}%", app.volume_percent())
-                    },
-                    Style::default()
-                        .fg(if app.muted { theme.warning } else { theme.secondary })
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                format!(" {}", title),
-                Style::default()
-                    .fg(theme.text)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(vec![
-                Span::styled(" by ", Style::default().fg(theme.muted)),
-                Span::styled(artist, Style::default().fg(theme.accent)),
-            ]),
-            Line::from(vec![
-                Span::styled(" on ", Style::default().fg(theme.muted)),
-                Span::styled(album, Style::default().fg(theme.secondary)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled(track_extension(track), Style::default().fg(theme.warning)),
-                Span::styled("  ", Style::default().fg(theme.muted)),
-                Span::styled(duration, Style::default().fg(theme.muted)),
-            ]),
-        ]
-    } else {
-        let selected_art = app.get_selected();
-        let has_art = selected_art
-            .as_deref()
-            .and_then(|t| app.album_art_for(t))
-            .is_some();
-        vec![
-            Line::from(Span::styled(
-                " Nothing playing",
-                Style::default().fg(theme.muted),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                " Press Enter to play",
-                Style::default().fg(theme.text),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                if has_art { " Album art ready" } else { " No album art" },
-                Style::default().fg(theme.muted),
-            )),
-            Line::from(Span::styled(
-                format!(" Vol {}%", app.volume_percent()),
-                Style::default().fg(theme.secondary),
-            )),
-        ]
-    };
-
-    let widget = Paragraph::new(lines).wrap(Wrap { trim: true });
+fn draw_art_placeholder(f: &mut Frame, area: Rect, theme: ThemePalette) {
+    let mid = area.height / 2;
+    let lines: Vec<Line> = (0..area.height)
+        .map(|row| {
+            if row == mid {
+                Line::from("♫")
+            } else {
+                Line::from("")
+            }
+        })
+        .collect();
+    let widget = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(theme.selection_bg).fg(theme.muted));
     f.render_widget(widget, area);
+}
+
+fn draw_track_details(f: &mut Frame, area: Rect, app: &App, track: &Path, theme: ThemePalette) {
+    let width = area.width as usize;
+    let meta = app.metadata_for(track);
+    let title = track_title(app, track);
+    let artist = meta
+        .map(|m| m.display_artist().to_string())
+        .unwrap_or_else(|| "Unknown artist".to_string());
+    let album = meta
+        .map(|m| m.display_album().to_string())
+        .unwrap_or_else(|| track_folder_name(track));
+
+    let mut tech = vec![track_extension(track)];
+    if let Some(rate) = meta.and_then(|m| m.sample_rate) {
+        tech.push(format!("{:.1} kHz", rate as f64 / 1000.0));
+    }
+    if let Some(duration) = meta.and_then(|m| m.duration) {
+        tech.push(metadata::format_duration(duration));
+    }
+
+    let is_current = app.current_track.as_deref() == Some(track);
+    let (state_icon, state_label, state_color) = match (is_current, &app.playback_state) {
+        (true, PlaybackState::Playing) => ("▶", "playing", theme.success),
+        (true, PlaybackState::Paused) => ("⏸", "paused", theme.warning),
+        _ => ("⏎", "press Enter to play", theme.muted),
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            fit(&title, width),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            fit(&artist, width),
+            Style::default().fg(theme.accent),
+        )),
+        Line::from(Span::styled(
+            fit(&album, width),
+            Style::default().fg(theme.secondary),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            fit(&tech.join(" · "), width),
+            Style::default().fg(theme.muted),
+        )),
+    ];
+    if let Some(year) = meta.and_then(|m| m.year) {
+        let genre = meta.and_then(|m| m.genre.clone());
+        let text = match genre {
+            Some(genre) => format!("{year} · {genre}"),
+            None => year.to_string(),
+        };
+        lines.push(Line::from(Span::styled(
+            fit(&text, width),
+            Style::default().fg(theme.muted),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(format!("{state_icon} "), Style::default().fg(state_color)),
+        Span::styled(state_label, Style::default().fg(state_color)),
+    ]));
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_queue_preview(f: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme_mode.palette();
-    let title = format!(" Queue ({}) ", app.queue_len());
+    let block = panel(format!("Up Next · {}", app.queue_len()), theme.warning);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let width = inner.width as usize;
 
     let lines: Vec<Line> = if app.queue.is_empty() {
         vec![
@@ -498,468 +542,504 @@ fn draw_queue_preview(f: &mut Frame, area: Rect, app: &App) {
                 "Queue is empty",
                 Style::default().fg(theme.muted),
             )),
-            Line::from(Span::styled(
-                "Press 'a' to add the selected track",
-                Style::default().fg(theme.muted),
-            )),
-            Line::from(Span::styled(
-                "Press 'A' to enqueue all filtered tracks",
-                Style::default().fg(theme.muted),
-            )),
-            Line::from(Span::styled(
-                "Press 'Q' to open the queue manager",
-                Style::default().fg(theme.muted),
-            )),
+            Line::from(vec![
+                Span::styled("a", Style::default().fg(theme.warning)),
+                Span::styled(" add selected  ", Style::default().fg(theme.muted)),
+                Span::styled("A", Style::default().fg(theme.warning)),
+                Span::styled(" add all shown", Style::default().fg(theme.muted)),
+            ]),
         ]
     } else {
-        let mut lines = Vec::new();
-        for (i, track) in app.queue_peek(5).iter().enumerate() {
-            let name = track_display_name(track);
-            lines.push(Line::from(vec![
-                Span::styled(format!("{}. ", i + 1), Style::default().fg(theme.muted)),
-                Span::styled(name, Style::default().fg(theme.text)),
-            ]));
-        }
-        if app.queue_len() > 5 {
+        let shown = inner.height.saturating_sub(1).max(1) as usize;
+        let mut lines: Vec<Line> = app
+            .queue_peek(shown)
+            .iter()
+            .enumerate()
+            .map(|(i, track)| {
+                let label = match track_artist(app, track) {
+                    Some(artist) => format!("{} — {}", track_title(app, track), artist),
+                    None => track_title(app, track),
+                };
+                Line::from(vec![
+                    Span::styled(format!("{:>2}  ", i + 1), Style::default().fg(theme.muted)),
+                    Span::styled(
+                        fit(&label, width.saturating_sub(4)),
+                        Style::default().fg(theme.text),
+                    ),
+                ])
+            })
+            .collect();
+        if app.queue_len() > shown {
             lines.push(Line::from(Span::styled(
-                format!("+ {} more...", app.queue_len() - 5),
+                format!("    + {} more · Q to manage", app.queue_len() - shown),
                 Style::default().fg(theme.muted),
             )));
         }
         lines
     };
 
-    let widget = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(theme.warning)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(widget, area);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_waveform_panel(f: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme_mode.palette();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Waveform ")
-        .border_style(Style::default().fg(theme.accent));
-
-    let Some(track) = app.get_selected() else {
-        let widget = Paragraph::new("No track selected")
-            .block(block)
-            .alignment(Alignment::Center);
-        f.render_widget(widget, area);
-        return;
-    };
-
-    if !app.is_waveform_enabled_for(&track) {
-        let widget = Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Waveform hidden",
-                Style::default().fg(theme.warning),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press w to enable the graph again.",
-                Style::default().fg(theme.muted),
-            )),
-        ])
-        .block(block)
-        .wrap(Wrap { trim: true });
-        f.render_widget(widget, area);
-        return;
-    }
-
-    let state = app.waveform_state_for(&track);
-    let samples = match state {
-        Some(WaveformState::Ready(data)) => data.clone(),
-        Some(WaveformState::Loading) => {
-            let widget = Paragraph::new("Decoding waveform...")
-                .block(block)
-                .style(Style::default().fg(theme.muted))
-                .alignment(Alignment::Center);
-            f.render_widget(widget, area);
-            return;
-        }
-        Some(WaveformState::Failed) => {
-            let widget = Paragraph::new("Failed to decode audio for waveform")
-                .block(block)
-                .style(Style::default().fg(theme.warning))
-                .alignment(Alignment::Center);
-            f.render_widget(widget, area);
-            return;
-        }
-        None => {
-            let widget = Paragraph::new("Waveform not requested yet")
-                .block(block)
-                .style(Style::default().fg(theme.muted))
-                .alignment(Alignment::Center);
-            f.render_widget(widget, area);
-            return;
-        }
-    };
-
+    let block = panel("Waveform", theme.accent);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if inner.width < 8 || inner.height < 4 {
-        let compact = Paragraph::new("Resize to view graph")
-            .style(Style::default().fg(theme.muted))
-            .alignment(Alignment::Center);
-        f.render_widget(compact, inner);
+    let track = app.current_track.clone().or_else(|| app.get_selected());
+    let message = |text: &str, color: Color| {
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(text.to_string(), Style::default().fg(color))),
+        ])
+        .alignment(Alignment::Center)
+    };
+
+    let Some(track) = track else {
+        f.render_widget(message("No track selected", theme.muted), inner);
+        return;
+    };
+    if !app.is_waveform_enabled_for(&track) {
+        f.render_widget(message("Hidden · press w to show", theme.muted), inner);
+        return;
+    }
+    let samples = match app.waveform_state_for(&track) {
+        Some(WaveformState::Ready(data)) => data,
+        Some(WaveformState::Loading) | None => {
+            f.render_widget(message("Decoding…", theme.muted), inner);
+            return;
+        }
+        Some(WaveformState::Failed) => {
+            f.render_widget(message("Could not decode audio", theme.warning), inner);
+            return;
+        }
+    };
+    if inner.width < 4 || inner.height < 1 || samples.is_empty() {
         return;
     }
 
-    let n = samples.len() as f64;
-    let positive: Vec<(f64, f64)> = samples
+    let cols = inner.width as usize;
+    let rows = inner.height as usize;
+    let peak = samples
         .iter()
-        .enumerate()
-        .map(|(i, v)| (i as f64, *v as f64))
-        .collect();
-    let negative: Vec<(f64, f64)> = samples
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (i as f64, -(*v as f64)))
+        .cloned()
+        .fold(0.0_f32, f32::max)
+        .max(f32::EPSILON);
+    let levels: Vec<f32> = (0..cols)
+        .map(|c| {
+            let start = c * samples.len() / cols;
+            let end = ((c + 1) * samples.len() / cols)
+                .max(start + 1)
+                .min(samples.len());
+            samples[start..end].iter().cloned().fold(0.0, f32::max) / peak
+        })
         .collect();
 
-    let is_current = app.current_track.as_ref() == Some(&track);
-    let progress_line: Vec<(f64, f64)> = if is_current {
-        if let Some(total) = app.current_total_duration() {
-            let pos = app.current_position();
-            let frac = if total.as_secs_f64() > 0.0 {
-                (pos.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let x = frac * n;
-            vec![(x, -1.1), (x, 1.1)]
-        } else {
-            Vec::new()
-        }
+    let played_cols = if app.current_track.as_deref() == Some(track.as_path()) {
+        (app.progress_ratio() * cols as f64).round() as usize
     } else {
-        Vec::new()
+        0
     };
 
-    let mut datasets = vec![
-        Dataset::default()
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme.success))
-            .data(&positive),
-        Dataset::default()
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme.secondary))
-            .data(&negative),
-    ];
-    if !progress_line.is_empty() {
-        datasets.push(
-            Dataset::default()
-                .marker(symbols::Marker::Block)
-                .graph_type(GraphType::Line)
-                .style(
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .data(&progress_line),
-        );
-    }
+    let lines: Vec<Line> = (0..rows)
+        .map(|r| {
+            let floor = (rows - 1 - r) * 8;
+            let spans: Vec<Span> = levels
+                .iter()
+                .enumerate()
+                .map(|(c, level)| {
+                    let eighths = ((level * (rows * 8) as f32).round() as usize).max(1);
+                    let glyph = BAR_GLYPHS[eighths.saturating_sub(floor).min(8)];
+                    let color = if c < played_cols {
+                        theme.accent
+                    } else if played_cols > 0 {
+                        theme.muted
+                    } else {
+                        theme.secondary
+                    };
+                    Span::styled(glyph.to_string(), Style::default().fg(color))
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
 
-    let chart = Chart::new(datasets)
-        .x_axis(Axis::default().bounds([0.0, n.max(1.0)]))
-        .y_axis(Axis::default().bounds([-1.1, 1.1]));
-
-    f.render_widget(chart, inner);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_quick_keys(f: &mut Frame, area: Rect, app: &App) {
+// ---------------------------------------------------------------- player bar
+
+fn draw_player_bar(f: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme_mode.palette();
-    let status_style = if app.last_error.is_some() {
-        Style::default().fg(Color::Rgb(255, 160, 160))
-    } else {
-        Style::default().fg(theme.text)
+    let (state_label, color) = match (&app.current_track, &app.playback_state) {
+        (Some(_), PlaybackState::Playing) => (format!("{} Playing", eq_glyph(app)), theme.success),
+        (Some(_), PlaybackState::Paused) => ("⏸ Paused".to_string(), theme.warning),
+        _ => ("⏹ Stopped".to_string(), theme.muted),
     };
+    let block = panel(state_label, color);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("← →", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" seek  "),
-            Span::styled("+ -", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" vol  "),
-            Span::styled("0", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" mute"),
-        ]),
-        Line::from(vec![
-            Span::styled("a", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" queue+  "),
-            Span::styled("Q", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" queue  "),
-            Span::styled("i", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" info"),
-        ]),
-        Line::from(vec![
-            Span::styled("S/L", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" save/load  "),
-            Span::styled("h", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::raw(" help"),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(app.status_message.clone(), status_style)]),
-    ];
-
-    let widget = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Controls ")
-                .border_style(Style::default().fg(theme.accent)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(widget, area);
-}
-
-fn draw_progress_panel(f: &mut Frame, area: Rect, app: &App) {
-    let theme = app.theme_mode.palette();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(18)])
-        .split(area);
+        .constraints([
+            Constraint::Min(20),
+            Constraint::Length(3),
+            Constraint::Length(20),
+        ])
+        .split(inner);
+    let main = chunks[0];
+    let width = main.width as usize;
 
-    let (ratio, label) = match (&app.current_track, app.current_total_duration()) {
-        (Some(_), Some(total)) => {
-            let pos = app.current_position();
-            let r = if total.as_secs_f64() > 0.0 {
-                (pos.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            (
-                r,
-                format!(
-                    "{} / {}",
-                    metadata::format_duration(pos),
-                    metadata::format_duration(total)
-                ),
-            )
+    // Line 1: what is playing.
+    let now = match &app.current_track {
+        Some(track) => {
+            let mut spans = vec![Span::styled(
+                track_title(app, track),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )];
+            if let Some(artist) = track_artist(app, track) {
+                spans.push(Span::styled("  —  ", Style::default().fg(theme.muted)));
+                spans.push(Span::styled(artist, Style::default().fg(theme.accent)));
+            }
+            spans
         }
-        (Some(_), None) => {
-            let pos = app.current_position();
-            (0.0, format!("{} / ?", metadata::format_duration(pos)))
-        }
-        (None, _) => (0.0, "—".to_string()),
+        None => vec![Span::styled(
+            "Nothing playing — pick a track and press Enter",
+            Style::default().fg(theme.muted),
+        )],
     };
-
-    let gauge = LineGauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Progress ")
-                .border_style(Style::default().fg(theme.success)),
-        )
-        .filled_style(Style::default().fg(theme.success).bg(theme.selection_bg))
-        .ratio(ratio)
-        .label(label);
-    f.render_widget(gauge, chunks[0]);
-
-    let vol_ratio = if app.muted {
-        0.0
+    let now_text: String = now.iter().map(|s| s.content.as_ref()).collect();
+    let now_line = if text_width(&now_text) > width {
+        Line::from(Span::styled(fit(&now_text, width), now[0].style))
     } else {
-        app.volume_percent() as f64 / 100.0
+        Line::from(now)
     };
+    f.render_widget(Paragraph::new(now_line), Rect { height: 1, ..main });
+
+    // Line 2: elapsed ━━━━●──── total
+    let (elapsed, total) = match (&app.current_track, app.current_total_duration()) {
+        (Some(_), Some(total)) => (
+            metadata::format_duration(app.current_position()),
+            metadata::format_duration(total),
+        ),
+        (Some(_), None) => (
+            metadata::format_duration(app.current_position()),
+            "?".into(),
+        ),
+        (None, _) => ("0:00".to_string(), "0:00".to_string()),
+    };
+    let prefix = format!("{elapsed} ");
+    let suffix = format!(" {total}");
+    let bar_width = width.saturating_sub(text_width(&prefix) + text_width(&suffix));
+    let filled = (app.progress_ratio() * bar_width as f64).round() as usize;
+    let mut bar = vec![Span::styled(
+        prefix.clone(),
+        Style::default().fg(theme.text),
+    )];
+    if bar_width > 0 {
+        let knob = filled.min(bar_width - 1);
+        bar.push(Span::styled(
+            "━".repeat(knob),
+            Style::default().fg(theme.accent),
+        ));
+        bar.push(Span::styled(
+            if app.current_track.is_some() {
+                "●"
+            } else {
+                "─"
+            },
+            Style::default().fg(theme.text),
+        ));
+        bar.push(Span::styled(
+            "─".repeat(bar_width - knob - 1),
+            Style::default().fg(theme.selection_bg),
+        ));
+    }
+    bar.push(Span::styled(suffix, Style::default().fg(theme.muted)));
+    let progress_row = Rect {
+        y: main.y + 1,
+        height: 1,
+        ..main
+    };
+    if main.height > 1 {
+        f.render_widget(Paragraph::new(Line::from(bar)), progress_row);
+    }
+
+    let mut hit = app.hit_areas.get();
+    hit.progress_bar = Rect {
+        x: progress_row.x + text_width(&prefix) as u16,
+        width: bar_width as u16,
+        ..progress_row
+    };
+    app.hit_areas.set(hit);
+
+    // Right: volume.
+    let vol = chunks[2];
     let vol_label = if app.muted {
         "muted".to_string()
     } else {
         format!("{}%", app.volume_percent())
     };
-    let vol_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Volume ")
-                .border_style(Style::default().fg(theme.warning)),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(if app.muted { theme.muted } else { theme.warning })
-                .bg(theme.selection_bg)
-                .add_modifier(Modifier::BOLD),
-        )
-        .ratio(vol_ratio)
-        .label(vol_label);
-    f.render_widget(vol_gauge, chunks[1]);
+    let slots = 10;
+    let lit = (app.volume_percent() as usize * slots)
+        .div_ceil(100)
+        .min(slots);
+    let vol_color = if app.muted {
+        theme.muted
+    } else {
+        theme.warning
+    };
+    let vol_lines = vec![
+        Line::from(vec![
+            Span::styled("vol ", Style::default().fg(theme.muted)),
+            Span::styled(
+                vol_label,
+                Style::default().fg(vol_color).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("━".repeat(lit), Style::default().fg(vol_color)),
+            Span::styled(
+                "─".repeat(slots - lit),
+                Style::default().fg(theme.selection_bg),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(vol_lines).alignment(Alignment::Right), vol);
 }
 
-fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
+fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme_mode.palette();
-    let top_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(32),
-            Constraint::Percentage(36),
-            Constraint::Percentage(32),
-        ])
-        .split(area);
-
-    let current_selection = if app.visible_track_count() == 0 {
-        "No selection".to_string()
+    let (status, fresh) = app.status();
+    let status_color = if status.starts_with("Error") {
+        theme.warning
+    } else if fresh {
+        theme.text
     } else {
-        format!(
-            "Track {}/{}",
-            app.selected_track_number(),
-            app.visible_track_count()
-        )
+        theme.muted
     };
 
-    let selection_widget = Paragraph::new(current_selection).style(
-        Style::default()
-            .fg(theme.secondary)
-            .add_modifier(Modifier::BOLD),
-    );
-    f.render_widget(selection_widget, top_chunks[0]);
-
-    let help_text = if app.is_searching {
-        "Search: type to filter, Enter keep, Esc clear"
+    let hints: Vec<Span> = if app.is_searching {
+        [("type", "filter"), ("⏎", "keep"), ("esc", "clear")]
+            .into_iter()
+            .flat_map(|(k, l)| key_hint(k, l, theme))
+            .collect()
     } else {
-        "Enter play  ← → seek  + - vol  a queue  Q manage  i info  h help  q quit"
-    };
-    let help_widget = Paragraph::new(help_text)
-        .style(
-            Style::default()
-                .fg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )
-        .alignment(Alignment::Center);
-    f.render_widget(help_widget, top_chunks[1]);
-
-    let playback_info = match (&app.current_track, &app.playback_state) {
-        (Some(track), state) => {
-            let filename = track_display_name(track);
-            let status_icon = match state {
-                PlaybackState::Playing => ">",
-                PlaybackState::Paused => "||",
-                PlaybackState::Stopped => "[]",
-            };
-            format!("{} {}", status_icon, filename)
-        }
-        (None, _) => "No track playing".to_string(),
+        [
+            ("⏎", "play"),
+            ("p", "pause"),
+            ("n/b", "next/prev"),
+            ("a", "queue"),
+            ("z", "shuffle"),
+            ("/", "search"),
+            ("?", "help"),
+            ("q", "quit"),
+        ]
+        .into_iter()
+        .flat_map(|(k, l)| key_hint(k, l, theme))
+        .collect()
     };
 
-    let playback_widget = Paragraph::new(playback_info)
-        .style(
-            Style::default()
-                .fg(theme.success)
-                .add_modifier(Modifier::BOLD),
+    let width = area.width as usize;
+    let hints_width: usize = hints.iter().map(|s| s.width()).sum();
+    let status_span = |room: usize| {
+        Span::styled(
+            format!(" {}", fit(&status, room.saturating_sub(1))),
+            Style::default().fg(status_color),
         )
-        .alignment(Alignment::Right);
-    f.render_widget(playback_widget, top_chunks[2]);
+    };
+    let line = if hints_width + 20 <= width {
+        spread(vec![status_span(width - hints_width - 2)], hints, width)
+    } else {
+        Line::from(status_span(width))
+    };
+    f.render_widget(Paragraph::new(line), area);
 }
+
+// ---------------------------------------------------------------- popups
 
 fn draw_queue_popup(f: &mut Frame, app: &mut App) {
     let theme = app.theme_mode.palette();
     let area = centered_rect(70, 70, f.size());
     f.render_widget(Clear, area);
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .title(format!(" Queue Manager ({}) ", app.queue_len()))
-        .border_style(Style::default().fg(theme.warning));
+    let outer = panel(format!("Queue · {} tracks", app.queue_len()), theme.warning);
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(4)])
+        .horizontal_margin(1)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
         .split(inner);
 
     if app.queue.is_empty() {
         let empty = Paragraph::new(vec![
-            Line::from("Queue is empty"),
             Line::from(""),
-            Line::from("Close this popup (Esc / Q), highlight a track in the library,"),
-            Line::from("then press 'a' to enqueue it or 'A' to enqueue all filtered tracks."),
+            Line::from(Span::styled(
+                "Queue is empty",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Close this popup, highlight a track and press a to enqueue it,"),
+            Line::from("or A to enqueue every track in the current view."),
         ])
         .style(Style::default().fg(theme.muted))
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
         f.render_widget(empty, chunks[0]);
     } else {
+        let width = chunks[0].width as usize;
         let items: Vec<ListItem> = app
             .queue
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                let meta = app.metadata_for(path);
-                let title = meta
-                    .and_then(|m| m.title.clone())
-                    .unwrap_or_else(|| track_display_name(path));
-                let artist = meta
-                    .map(|m| m.display_artist().to_string())
+                let duration = app
+                    .metadata_for(path)
+                    .and_then(|m| m.duration)
+                    .map(metadata::format_duration)
                     .unwrap_or_default();
-                ListItem::new(vec![
-                    Line::from(vec![
+                let artist = track_artist(app, path).unwrap_or_else(|| track_folder_name(path));
+                let room = width.saturating_sub(6 + text_width(&duration) + 1);
+                ListItem::new(spread(
+                    vec![
+                        Span::styled(format!("{:>3}  ", i + 1), Style::default().fg(theme.muted)),
                         Span::styled(
-                            format!("{:3}. ", i + 1),
-                            Style::default().fg(theme.muted),
-                        ),
-                        Span::styled(
-                            title,
+                            fit(&track_title(app, path), room / 2 + room % 2),
                             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                         ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("     ", Style::default()),
-                        Span::styled(artist, Style::default().fg(theme.accent)),
                         Span::styled("  ", Style::default()),
-                        Span::styled(
-                            track_folder_name(path),
-                            Style::default().fg(theme.muted),
-                        ),
-                    ]),
-                ])
+                        Span::styled(fit(&artist, room / 2), Style::default().fg(theme.accent)),
+                    ],
+                    vec![
+                        Span::styled(duration, Style::default().fg(theme.muted)),
+                        Span::raw(" "),
+                    ],
+                    width,
+                ))
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(
-                Style::default()
-                    .bg(theme.selection_bg)
-                    .fg(theme.text)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> ");
+        let list = List::new(items).highlight_style(Style::default().bg(theme.selection_bg));
         f.render_stateful_widget(list, chunks[0], &mut app.queue_state);
     }
 
+    let mut hints: Vec<Span> = Vec::new();
+    for (k, l) in [
+        ("j/k", "move"),
+        ("⏎", "play"),
+        ("d", "remove"),
+        ("c", "clear"),
+        ("esc", "close"),
+    ] {
+        hints.extend(key_hint(k, l, theme));
+    }
     let help = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("j/k ↑/↓", Style::default().fg(theme.warning)),
-            Span::raw(" navigate    "),
-            Span::styled("Enter", Style::default().fg(theme.warning)),
-            Span::raw(" play this item (drops earlier items)    "),
-            Span::styled("d", Style::default().fg(theme.warning)),
-            Span::raw(" remove"),
-        ]),
-        Line::from(vec![
-            Span::styled("c", Style::default().fg(theme.warning)),
-            Span::raw(" clear queue    "),
-            Span::styled("Esc / Q", Style::default().fg(theme.warning)),
-            Span::raw(" close popup"),
-        ]),
+        Line::from(hints),
         Line::from(Span::styled(
-            "Use S in the main view to save this queue to ~/.config/meloic/queue.m3u, L to reload it.",
+            "S / L in the main view saves / loads ~/.config/meloic/queue.m3u",
             Style::default().fg(theme.muted),
         )),
     ])
+    .wrap(Wrap { trim: true })
     .block(
         Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(theme.muted)),
-    )
-    .wrap(Wrap { trim: true });
+            .border_style(Style::default().fg(theme.selection_bg)),
+    );
     f.render_widget(help, chunks[1]);
+}
+
+fn draw_cover_popup(f: &mut Frame, app: &App) {
+    let theme = app.theme_mode.palette();
+    let area = centered_rect(80, 92, f.size());
+    f.render_widget(Clear, area);
+
+    let block = panel("Cover", theme.accent).title(
+        ratatui::widgets::block::Title::from(Span::styled(
+            format!(
+                " {} · v / esc to close ",
+                app.covers.borrow().protocol_label()
+            ),
+            Style::default().fg(theme.muted),
+        ))
+        .alignment(Alignment::Right),
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(track) = app.current_track.clone().or_else(|| app.get_selected()) else {
+        return;
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(4),
+        ])
+        .split(inner);
+
+    let art = app.covers.borrow().square_in(chunks[0]);
+    draw_cover(f, art, app, CoverSlot::Popup, &track);
+
+    let meta = app.metadata_for(&track);
+    let width = chunks[2].width as usize;
+    let mut details = vec![
+        Span::styled(
+            meta.map(|m| m.display_artist().to_string())
+                .unwrap_or_else(|| "Unknown artist".into()),
+            Style::default().fg(theme.accent),
+        ),
+        Span::styled("  ·  ", Style::default().fg(theme.muted)),
+        Span::styled(
+            meta.map(|m| m.display_album().to_string())
+                .unwrap_or_else(|| track_folder_name(&track)),
+            Style::default().fg(theme.secondary),
+        ),
+    ];
+    if let Some(year) = meta.and_then(|m| m.year) {
+        details.push(Span::styled(
+            format!("  ·  {year}"),
+            Style::default().fg(theme.muted),
+        ));
+    }
+
+    let is_current = app.current_track.as_deref() == Some(track.as_path());
+    let progress = if is_current {
+        let width = width.min(60);
+        let filled = (app.progress_ratio() * width as f64).round() as usize;
+        Line::from(vec![
+            Span::styled("━".repeat(filled), Style::default().fg(theme.accent)),
+            Span::styled(
+                "─".repeat(width - filled),
+                Style::default().fg(theme.selection_bg),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            "press Enter in the library to play",
+            Style::default().fg(theme.muted),
+        ))
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            fit(&track_title(app, &track), width),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(details),
+        Line::from(""),
+        progress,
+    ];
+    f.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        chunks[2],
+    );
 }
 
 fn draw_info_popup(f: &mut Frame, app: &App) {
@@ -967,127 +1047,103 @@ fn draw_info_popup(f: &mut Frame, app: &App) {
     let area = centered_rect(60, 70, f.size());
     f.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Track Info ")
-        .border_style(Style::default().fg(theme.secondary));
+    let block = panel("Track Info", theme.secondary);
 
     let Some(track) = app.get_selected() else {
-        let widget = Paragraph::new("No track selected").block(block);
-        f.render_widget(widget, area);
+        f.render_widget(Paragraph::new("No track selected").block(block), area);
         return;
     };
 
-    let meta = app.metadata_for(&track);
     let unknown = TrackMetadata::default();
-    let m = meta.unwrap_or(&unknown);
+    let m = app.metadata_for(&track).unwrap_or(&unknown);
+    let dash = || "—".to_string();
 
-    let duration = m
-        .duration
-        .map(metadata::format_duration)
-        .unwrap_or_else(|| "—".to_string());
-    let sample_rate = m
-        .sample_rate
-        .map(|s| format!("{} Hz", s))
-        .unwrap_or_else(|| "—".to_string());
-    let bit_depth = m
-        .bit_depth
-        .map(|b| format!("{} bit", b))
-        .unwrap_or_else(|| "—".to_string());
-    let channels = m
-        .channels
-        .map(|c| match c {
-            1 => "mono".to_string(),
-            2 => "stereo".to_string(),
-            n => format!("{} ch", n),
-        })
-        .unwrap_or_else(|| "—".to_string());
+    let field = |label: &str, value: String, color: Color| {
+        Line::from(vec![
+            Span::styled(format!("  {label:<12}"), Style::default().fg(theme.muted)),
+            Span::styled(value, Style::default().fg(color)),
+        ])
+    };
+    let heading = |text: &str| {
+        Line::from(Span::styled(
+            format!("  {text}"),
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
 
     let lines = vec![
-        Line::from(vec![
-            Span::styled("Title  ", Style::default().fg(theme.muted)),
-            Span::styled(
-                m.display_title(&track_display_name(&track)).to_string(),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Artist ", Style::default().fg(theme.muted)),
-            Span::styled(m.display_artist().to_string(), Style::default().fg(theme.accent)),
-        ]),
-        Line::from(vec![
-            Span::styled("Album  ", Style::default().fg(theme.muted)),
-            Span::styled(m.display_album().to_string(), Style::default().fg(theme.secondary)),
-        ]),
-        Line::from(vec![
-            Span::styled("Year   ", Style::default().fg(theme.muted)),
-            Span::styled(
-                m.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into()),
-                Style::default().fg(theme.text),
-            ),
-            Span::styled("    Track ", Style::default().fg(theme.muted)),
-            Span::styled(
-                m.track_number.map(|t| t.to_string()).unwrap_or_else(|| "—".into()),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Genre  ", Style::default().fg(theme.muted)),
-            Span::styled(
-                m.genre.clone().unwrap_or_else(|| "—".into()),
-                Style::default().fg(theme.warning),
-            ),
-        ]),
         Line::from(""),
-        Line::from(vec![Span::styled(
-            "AUDIO PROPERTIES",
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![
-            Span::styled("Duration   ", Style::default().fg(theme.muted)),
-            Span::styled(duration, Style::default().fg(theme.success)),
-        ]),
-        Line::from(vec![
-            Span::styled("Sample rate ", Style::default().fg(theme.muted)),
-            Span::styled(sample_rate, Style::default().fg(theme.text)),
-        ]),
-        Line::from(vec![
-            Span::styled("Bit depth   ", Style::default().fg(theme.muted)),
-            Span::styled(bit_depth, Style::default().fg(theme.text)),
-        ]),
-        Line::from(vec![
-            Span::styled("Channels    ", Style::default().fg(theme.muted)),
-            Span::styled(channels, Style::default().fg(theme.text)),
-        ]),
-        Line::from(vec![
-            Span::styled("Format      ", Style::default().fg(theme.muted)),
-            Span::styled(track_extension(&track), Style::default().fg(theme.accent)),
-        ]),
-        Line::from(vec![
-            Span::styled("Size        ", Style::default().fg(theme.muted)),
-            Span::styled(human_file_size(&track), Style::default().fg(theme.text)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "PATH",
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        )]),
         Line::from(Span::styled(
-            track.to_string_lossy().to_string(),
+            format!("  {}", m.display_title(&track_display_name(&track))),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        heading("TAGS"),
+        field("Artist", m.display_artist().to_string(), theme.accent),
+        field("Album", m.display_album().to_string(), theme.secondary),
+        field(
+            "Year",
+            m.year.map(|y| y.to_string()).unwrap_or_else(dash),
+            theme.text,
+        ),
+        field(
+            "Track",
+            m.track_number.map(|t| t.to_string()).unwrap_or_else(dash),
+            theme.text,
+        ),
+        field("Genre", m.genre.clone().unwrap_or_else(dash), theme.warning),
+        Line::from(""),
+        heading("AUDIO"),
+        field(
+            "Duration",
+            m.duration
+                .map(metadata::format_duration)
+                .unwrap_or_else(dash),
+            theme.success,
+        ),
+        field(
+            "Sample rate",
+            m.sample_rate
+                .map(|s| format!("{s} Hz"))
+                .unwrap_or_else(dash),
+            theme.text,
+        ),
+        field(
+            "Bit depth",
+            m.bit_depth.map(|b| format!("{b} bit")).unwrap_or_else(dash),
+            theme.text,
+        ),
+        field(
+            "Channels",
+            m.channels
+                .map(|c| match c {
+                    1 => "mono".to_string(),
+                    2 => "stereo".to_string(),
+                    n => format!("{n} ch"),
+                })
+                .unwrap_or_else(dash),
+            theme.text,
+        ),
+        field("Format", track_extension(&track), theme.accent),
+        field("Size", human_file_size(&track), theme.text),
+        Line::from(""),
+        heading("PATH"),
+        Line::from(Span::styled(
+            format!("  {}", track.to_string_lossy()),
             Style::default().fg(theme.muted),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Press i or Esc to close",
+            "  i / esc to close",
             Style::default().fg(theme.muted),
         )),
     ];
 
-    let widget = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
+    let widget = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 }
 
@@ -1115,7 +1171,7 @@ fn human_file_size(path: &Path) -> String {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1134,4 +1190,3 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
-

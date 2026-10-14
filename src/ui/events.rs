@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use std::{io, time::Duration};
 
 #[derive(Debug, Clone)]
@@ -43,21 +43,48 @@ pub enum AppAction {
     ToggleInfoView,
     QueueRemoveSelected,
     QueuePlaySelected,
+    ToggleShuffle,
+    ToggleCoverView,
+    Escape,
+    ScrollDown,
+    ScrollUp,
+    Click(u16, u16),
 }
 
-pub fn handle_events(
-    is_searching: bool,
-    in_popup_queue: bool,
-    in_popup_info: bool,
-) -> io::Result<Option<AppAction>> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    Search,
+    Help,
+    Queue,
+    Info,
+    Cover,
+}
+
+pub fn handle_events(mode: InputMode) -> io::Result<Option<AppAction>> {
     if !event::poll(Duration::from_millis(100))? {
         return Ok(None);
     }
-    let Event::Key(key) = event::read()? else {
-        return Ok(None);
+    let key = match event::read()? {
+        Event::Key(key) => key,
+        Event::Mouse(mouse) => {
+            let in_list_view = matches!(
+                mode,
+                InputMode::Normal | InputMode::Search | InputMode::Queue
+            );
+            return Ok(match mouse.kind {
+                MouseEventKind::ScrollDown if in_list_view => Some(AppAction::ScrollDown),
+                MouseEventKind::ScrollUp if in_list_view => Some(AppAction::ScrollUp),
+                MouseEventKind::Down(MouseButton::Left) if mode == InputMode::Normal => {
+                    Some(AppAction::Click(mouse.column, mouse.row))
+                }
+                _ => None,
+            });
+        }
+        _ => return Ok(None),
     };
 
-    if is_searching {
+    if mode == InputMode::Search {
         return Ok(match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Some(AppAction::CancelSearch),
             (KeyCode::Enter, _) => Some(AppAction::ConfirmSearch),
@@ -69,7 +96,30 @@ pub fn handle_events(
         });
     }
 
-    if in_popup_info {
+    if mode == InputMode::Help {
+        return Ok(match key.code {
+            KeyCode::Esc | KeyCode::Char('q' | 'h' | '?') | KeyCode::F(1) => {
+                Some(AppAction::ToggleHelp)
+            }
+            _ => None,
+        });
+    }
+
+    if mode == InputMode::Cover {
+        return Ok(match key.code {
+            KeyCode::Esc | KeyCode::Char('v' | 'q') => Some(AppAction::ToggleCoverView),
+            KeyCode::Char('p') => Some(AppAction::TogglePause),
+            KeyCode::Char('n') => Some(AppAction::NextTrack),
+            KeyCode::Char('b') => Some(AppAction::PreviousTrack),
+            KeyCode::Left => Some(AppAction::SeekBackward),
+            KeyCode::Right => Some(AppAction::SeekForward),
+            KeyCode::Char('+' | '=') => Some(AppAction::VolumeUp),
+            KeyCode::Char('-' | '_') => Some(AppAction::VolumeDown),
+            _ => None,
+        });
+    }
+
+    if mode == InputMode::Info {
         return Ok(match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('i'), _) | (KeyCode::Char('q'), _) => {
                 Some(AppAction::ToggleInfoView)
@@ -78,14 +128,12 @@ pub fn handle_events(
         });
     }
 
-    if in_popup_queue {
+    if mode == InputMode::Queue {
         return Ok(match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('Q'), _) => Some(AppAction::ToggleQueueView),
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => Some(AppAction::NextItem),
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => Some(AppAction::PreviousItem),
-            (KeyCode::Char('d'), _) | (KeyCode::Delete, _) => {
-                Some(AppAction::QueueRemoveSelected)
-            }
+            (KeyCode::Char('d'), _) | (KeyCode::Delete, _) => Some(AppAction::QueueRemoveSelected),
             (KeyCode::Char('c'), _) => Some(AppAction::ClearQueue),
             (KeyCode::Enter, _) => Some(AppAction::QueuePlaySelected),
             _ => None,
@@ -93,7 +141,8 @@ pub fn handle_events(
     }
 
     Ok(match (key.code, key.modifiers) {
-        (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(AppAction::Quit),
+        (KeyCode::Char('q'), _) => Some(AppAction::Quit),
+        (KeyCode::Esc, _) => Some(AppAction::Escape),
 
         (KeyCode::Down, _) | (KeyCode::Char('j'), _) => Some(AppAction::NextItem),
         (KeyCode::Up, _) | (KeyCode::Char('k'), _) => Some(AppAction::PreviousItem),
@@ -120,6 +169,7 @@ pub fn handle_events(
         (KeyCode::Char('b'), _) => Some(AppAction::PreviousTrack),
         (KeyCode::Char('t'), _) => Some(AppAction::CycleSort),
         (KeyCode::Char('m'), _) => Some(AppAction::CycleRepeat),
+        (KeyCode::Char('z'), _) => Some(AppAction::ToggleShuffle),
         (KeyCode::Char('c'), _) => Some(AppAction::CycleTheme),
         (KeyCode::Char('w'), _) => Some(AppAction::ToggleWaveform),
 
@@ -132,12 +182,8 @@ pub fn handle_events(
         (KeyCode::Char('0'), _) => Some(AppAction::ToggleMute),
 
         // Seek
-        (KeyCode::Left, m) if m.contains(KeyModifiers::SHIFT) => {
-            Some(AppAction::SeekBackwardLarge)
-        }
-        (KeyCode::Right, m) if m.contains(KeyModifiers::SHIFT) => {
-            Some(AppAction::SeekForwardLarge)
-        }
+        (KeyCode::Left, m) if m.contains(KeyModifiers::SHIFT) => Some(AppAction::SeekBackwardLarge),
+        (KeyCode::Right, m) if m.contains(KeyModifiers::SHIFT) => Some(AppAction::SeekForwardLarge),
         (KeyCode::Left, _) => Some(AppAction::SeekBackward),
         (KeyCode::Right, _) => Some(AppAction::SeekForward),
 
@@ -148,6 +194,7 @@ pub fn handle_events(
         (KeyCode::Char('S'), _) => Some(AppAction::SaveQueue),
         (KeyCode::Char('L'), _) => Some(AppAction::LoadQueue),
         (KeyCode::Char('i'), _) => Some(AppAction::ToggleInfoView),
+        (KeyCode::Char('v'), _) => Some(AppAction::ToggleCoverView),
 
         _ => None,
     })

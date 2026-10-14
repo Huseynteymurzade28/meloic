@@ -1,4 +1,5 @@
 pub mod app;
+pub mod cover;
 pub mod events;
 pub mod help;
 pub mod widgets;
@@ -12,7 +13,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{io, path::PathBuf};
 
 use app::App;
-use events::handle_events;
+use app::ViewMode;
+use events::{InputMode, handle_events};
 use widgets::draw_ui;
 
 pub fn run_ui(
@@ -20,13 +22,14 @@ pub fn run_ui(
     scan_roots: Vec<PathBuf>,
     initial_queue: Vec<PathBuf>,
 ) -> io::Result<Option<PathBuf>> {
+    let picker = cover::detect_picker();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(tracks.to_vec(), scan_roots, initial_queue);
+    let mut app = App::new(tracks.to_vec(), scan_roots, initial_queue, picker);
     app.select_first();
 
     let result = run_app(&mut terminal, app);
@@ -53,10 +56,19 @@ fn run_app(
 
         terminal.draw(|f| draw_ui(f, &mut app))?;
 
-        let in_popup_queue = app.in_popup_queue();
-        let in_popup_info = app.in_popup_info();
+        let mode = if app.is_searching {
+            InputMode::Search
+        } else {
+            match app.current_view {
+                ViewMode::Normal => InputMode::Normal,
+                ViewMode::Help => InputMode::Help,
+                ViewMode::Queue => InputMode::Queue,
+                ViewMode::Info => InputMode::Info,
+                ViewMode::Cover => InputMode::Cover,
+            }
+        };
 
-        match handle_events(app.is_searching, in_popup_queue, in_popup_info)? {
+        match handle_events(mode)? {
             Some(events::AppAction::Quit) => return Ok(None),
             Some(events::AppAction::NextItem) => app.next(),
             Some(events::AppAction::PreviousItem) => app.previous(),
@@ -110,6 +122,16 @@ fn run_app(
             Some(events::AppAction::QueueRemoveSelected) => app.remove_queue_selected(),
             Some(events::AppAction::QueuePlaySelected) => {
                 if let Err(error) = app.queue_play_selected() {
+                    app.set_error(error);
+                }
+            }
+            Some(events::AppAction::ToggleCoverView) => app.toggle_cover_view(),
+            Some(events::AppAction::ToggleShuffle) => app.toggle_shuffle(),
+            Some(events::AppAction::Escape) => app.escape(),
+            Some(events::AppAction::ScrollDown) => app.scroll(true),
+            Some(events::AppAction::ScrollUp) => app.scroll(false),
+            Some(events::AppAction::Click(column, row)) => {
+                if let Err(error) = app.click(column, row) {
                     app.set_error(error);
                 }
             }

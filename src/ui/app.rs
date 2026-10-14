@@ -1,21 +1,34 @@
 use rand::seq::SliceRandom;
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::library;
 use crate::metadata::{self, TrackMetadata};
 use crate::playlist;
+use crate::ui::cover::CoverRenderer;
 use crate::waveform::{WaveformService, WaveformState};
 
 const SEEK_SMALL: Duration = Duration::from_secs(5);
 const SEEK_LARGE: Duration = Duration::from_secs(30);
 const VOLUME_STEP: f32 = 0.05;
 const DEFAULT_VOLUME: f32 = 0.8;
+pub const LIST_ROW_HEIGHT: u16 = 2;
+const STATUS_TTL: Duration = Duration::from_secs(5);
+
+/// Screen regions recorded during the last draw, used to route mouse clicks.
+#[derive(Default, Clone, Copy)]
+pub struct HitAreas {
+    pub list: Rect,
+    pub list_offset: usize,
+    pub progress_bar: Rect,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaybackState {
@@ -269,6 +282,7 @@ pub enum ViewMode {
     Help,
     Queue,
     Info,
+    Cover,
 }
 
 pub struct App {
@@ -300,10 +314,20 @@ pub struct App {
     pub metadata_cache: HashMap<PathBuf, Option<TrackMetadata>>,
     pub waveform: WaveformService,
     pub album_art_cache: HashMap<PathBuf, Option<Vec<u8>>>,
+    pub covers: RefCell<CoverRenderer>,
+    pub hit_areas: Cell<HitAreas>,
+    pub shuffle: bool,
+    pub started_at: Instant,
+    status_seen: RefCell<(String, Instant)>,
 }
 
 impl App {
-    pub fn new(items: Vec<PathBuf>, scan_roots: Vec<PathBuf>, initial_queue: Vec<PathBuf>) -> App {
+    pub fn new(
+        items: Vec<PathBuf>,
+        scan_roots: Vec<PathBuf>,
+        initial_queue: Vec<PathBuf>,
+        picker: Option<ratatui_image::picker::Picker>,
+    ) -> App {
         let total = items.len();
         let mut app = App {
             items: items.clone(),
@@ -334,6 +358,11 @@ impl App {
             metadata_cache: HashMap::new(),
             waveform: WaveformService::new(),
             album_art_cache: HashMap::new(),
+            covers: RefCell::new(CoverRenderer::new(picker)),
+            hit_areas: Cell::new(HitAreas::default()),
+            shuffle: false,
+            started_at: Instant::now(),
+            status_seen: RefCell::new((String::new(), Instant::now())),
         };
         app.update_filtered_items();
         app
@@ -508,6 +537,19 @@ impl App {
         }
     }
 
+    pub fn toggle_cover_view(&mut self) {
+        self.current_view = match self.current_view {
+            ViewMode::Cover => ViewMode::Normal,
+            _ => {
+                if let Some(track) = self.current_track.clone().or_else(|| self.get_selected()) {
+                    self.ensure_metadata(&track);
+                    self.ensure_album_art(&track);
+                }
+                ViewMode::Cover
+            }
+        };
+    }
+
     pub fn toggle_info_view(&mut self) {
         self.current_view = match self.current_view {
             ViewMode::Info => ViewMode::Normal,
@@ -520,18 +562,74 @@ impl App {
         };
     }
 
-    pub fn in_popup_queue(&self) -> bool {
-        matches!(self.current_view, ViewMode::Queue)
+    /// Esc in the main view: clear an active filter instead of quitting.
+    pub fn escape(&mut self) {
+        if !self.search_query.is_empty() {
+            self.cancel_search();
+        }
     }
 
-    pub fn in_popup_info(&self) -> bool {
-        matches!(self.current_view, ViewMode::Info)
+    pub fn scroll(&mut self, down: bool) {
+        if down { self.next() } else { self.previous() }
+    }
+
+    /// Left click: select a library row (play it when already selected) or
+    /// seek when the progress bar is hit.
+    pub fn click(&mut self, column: u16, row: u16) -> Result<(), Box<dyn std::error::Error>> {
+        let hit = self.hit_areas.get();
+        let contains =
+            |r: Rect| column >= r.x && column < r.x + r.width && row >= r.y && row < r.y + r.height;
+
+        if contains(hit.progress_bar) && hit.progress_bar.width > 0 {
+            if let Some(total) = self.current_total_duration() {
+                let frac = (column - hit.progress_bar.x) as f64 / hit.progress_bar.width as f64;
+                self.seek_to(total.mul_f64(frac.clamp(0.0, 1.0)));
+            }
+            return Ok(());
+        }
+
+        if contains(hit.list) {
+            let index = hit.list_offset + ((row - hit.list.y) / LIST_ROW_HEIGHT) as usize;
+            if index >= self.filtered_items.len() {
+                return Ok(());
+            }
+            if self.state.selected() == Some(index) {
+                return self.play_selected();
+            }
+            self.state.select(Some(index));
+            if let Some(track) = self.get_selected() {
+                self.request_track_assets(&track);
+            }
+        }
+        Ok(())
+    }
+
+    /// Status message plus whether it is still fresh (recently changed).
+    pub fn status(&self) -> (String, bool) {
+        let mut seen = self.status_seen.borrow_mut();
+        if seen.0 != self.status_message {
+            *seen = (self.status_message.clone(), Instant::now());
+        }
+        (self.status_message.clone(), seen.1.elapsed() < STATUS_TTL)
+    }
+
+    /// Load tags for rows about to be drawn so the list can show artist/duration.
+    pub fn ensure_metadata_range(&mut self, start: usize, count: usize) {
+        let end = (start + count).min(self.filtered_items.len());
+        let paths: Vec<PathBuf> = self.filtered_items[start.min(end)..end]
+            .iter()
+            .map(|(_, p)| p.clone())
+            .collect();
+        for path in paths {
+            self.ensure_metadata(&path);
+        }
     }
 
     fn update_filtered_items(&mut self) {
         let previous_selection = self.get_selected();
         let query = self.search_query.to_lowercase();
 
+        let metadata_cache = &self.metadata_cache;
         self.filtered_items = self
             .items
             .iter()
@@ -540,10 +638,23 @@ impl App {
                 if query.is_empty() {
                     return true;
                 }
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.to_lowercase().contains(&query))
-                    .unwrap_or(false)
+                let meta_match = metadata_cache
+                    .get(*path)
+                    .and_then(|m| m.as_ref())
+                    .map(|m| {
+                        [&m.title, &m.artist, &m.album].iter().any(|field| {
+                            field
+                                .as_deref()
+                                .is_some_and(|v| v.to_lowercase().contains(&query))
+                        })
+                    })
+                    .unwrap_or(false);
+                meta_match
+                    || path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(|name| name.to_lowercase().contains(&query))
+                        .unwrap_or(false)
                     || path
                         .parent()
                         .and_then(|parent| parent.to_str())
@@ -660,6 +771,11 @@ impl App {
         self.status_message = format!("Repeat: {}", self.repeat_mode.label());
     }
 
+    pub fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+        self.status_message = format!("Shuffle: {}", if self.shuffle { "on" } else { "off" });
+    }
+
     pub fn cycle_theme_mode(&mut self) {
         self.theme_mode = self.theme_mode.next();
         save_theme(self.theme_mode);
@@ -686,14 +802,6 @@ impl App {
 
     pub fn waveform_state_for(&self, track: &Path) -> Option<&WaveformState> {
         self.waveform.get(track)
-    }
-
-    pub fn scan_roots_summary(&self) -> String {
-        self.scan_roots
-            .iter()
-            .map(|root| root.display().to_string())
-            .collect::<Vec<_>>()
-            .join("  |  ")
     }
 
     pub fn selected_track_number(&self) -> usize {
@@ -734,8 +842,11 @@ impl App {
             sink.set_volume(if self.muted { 0.0 } else { self.volume });
 
             self.sink = Some(Arc::new(sink));
-            let track_name = display_name(&track).to_string();
             self.ensure_metadata(&track);
+            let track_name = self
+                .metadata_for(&track)
+                .and_then(|m| m.title.clone())
+                .unwrap_or_else(|| display_name(&track));
             self.ensure_album_art(&track);
             self.waveform.request(&track);
             self.current_track = Some(track);
@@ -789,25 +900,34 @@ impl App {
             return self.play_track(next);
         }
 
-        if self.filtered_items.is_empty() {
+        let Some(next_index) = self.next_library_index() else {
             return Ok(());
-        }
-
-        let next_index = match self.current_track_index().or(self.state.selected()) {
-            Some(index) => {
-                if index + 1 < self.filtered_items.len() {
-                    index + 1
-                } else if self.repeat_mode == RepeatMode::All {
-                    0
-                } else {
-                    return Ok(());
-                }
-            }
-            None => 0,
         };
-
         self.state.select(Some(next_index));
         self.play_selected()
+    }
+
+    /// Index of the track that should follow the current one, honouring
+    /// shuffle and repeat-all. `None` means the end of the list was reached.
+    fn next_library_index(&self) -> Option<usize> {
+        let len = self.filtered_items.len();
+        if len == 0 {
+            return None;
+        }
+        let current = self.current_track_index().or(self.state.selected());
+
+        if self.shuffle && len > 1 {
+            let mut rng = rand::thread_rng();
+            let candidates: Vec<usize> = (0..len).filter(|i| Some(*i) != current).collect();
+            return candidates.choose(&mut rng).copied();
+        }
+
+        match current {
+            Some(index) if index + 1 < len => Some(index + 1),
+            Some(_) if self.repeat_mode == RepeatMode::All => Some(0),
+            Some(_) => None,
+            None => Some(0),
+        }
     }
 
     pub fn play_previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -835,11 +955,18 @@ impl App {
     pub fn update_playback_status(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.waveform.poll();
 
-        let track_finished = self
-            .sink
-            .as_ref()
-            .map(|sink| sink.empty())
-            .unwrap_or(false);
+        // The waveform panel follows the playing track, falling back to the
+        // selection; re-request whichever one a skipped decode left empty.
+        if let Some(track) = self
+            .current_track
+            .clone()
+            .or_else(|| self.get_selected())
+            .filter(|track| self.is_waveform_enabled_for(track))
+        {
+            self.waveform.request(&track);
+        }
+
+        let track_finished = self.sink.as_ref().map(|sink| sink.empty()).unwrap_or(false);
 
         if !track_finished {
             return Ok(());
@@ -856,18 +983,12 @@ impl App {
                     let next = self.queue.remove(0);
                     self.fix_queue_state_after_removal(0);
                     self.play_track(next)?;
-                } else if self.repeat_mode == RepeatMode::All {
-                    let next_index = self.current_track_index().map(|index| {
-                        if index + 1 < self.filtered_items.len() {
-                            index + 1
-                        } else {
-                            0
-                        }
-                    });
-                    if let Some(next_index) = next_index {
-                        self.state.select(Some(next_index));
-                        self.play_selected()?;
-                    }
+                } else if let Some(next_index) = self
+                    .current_track_index()
+                    .and_then(|_| self.next_library_index())
+                {
+                    self.state.select(Some(next_index));
+                    self.play_selected()?;
                 } else {
                     self.current_track = None;
                     self.playback_state = PlaybackState::Stopped;
@@ -952,6 +1073,14 @@ impl App {
         } else {
             pos.saturating_sub(delta)
         };
+        self.seek_to(target);
+    }
+
+    pub fn seek_to(&mut self, target: Duration) {
+        let Some(ref sink) = self.sink else {
+            return;
+        };
+        let pos = sink.get_pos();
         let total = self.current_total_duration();
         let clamped = if let Some(total) = total {
             if target >= total {
@@ -977,11 +1106,17 @@ impl App {
         }
     }
 
+    pub fn progress_ratio(&self) -> f64 {
+        match self.current_total_duration() {
+            Some(total) if total.as_secs_f64() > 0.0 => {
+                (self.current_position().as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        }
+    }
+
     pub fn current_position(&self) -> Duration {
-        self.sink
-            .as_ref()
-            .map(|s| s.get_pos())
-            .unwrap_or_default()
+        self.sink.as_ref().map(|s| s.get_pos()).unwrap_or_default()
     }
 
     pub fn current_total_duration(&self) -> Option<Duration> {

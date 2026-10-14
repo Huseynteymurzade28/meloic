@@ -1,10 +1,11 @@
 use crate::ui::app::App;
+use crate::ui::widgets::centered_rect;
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 pub fn draw_help_screen(f: &mut Frame, app: &App) {
@@ -14,6 +15,7 @@ pub fn draw_help_screen(f: &mut Frame, app: &App) {
 
     let outer = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(Span::styled(
             "  ♪  MELOIC — Keyboard Reference  ♪  ",
             Style::default()
@@ -57,7 +59,7 @@ pub fn draw_help_screen(f: &mut Frame, app: &App) {
             Style::default().fg(theme.muted),
         ),
         Span::styled(
-            "  Press h, ? or F1 to close  ",
+            "  Press ?, h or Esc to close  ",
             Style::default()
                 .fg(theme.success)
                 .add_modifier(Modifier::BOLD),
@@ -70,10 +72,7 @@ pub fn draw_help_screen(f: &mut Frame, app: &App) {
 fn section(title: &str, theme: crate::ui::app::ThemePalette) -> Line<'static> {
     let title = title.to_string();
     Line::from(vec![
-        Span::styled(
-            "  ",
-            Style::default().fg(theme.accent),
-        ),
+        Span::styled("  ", Style::default().fg(theme.accent)),
         Span::styled(
             title,
             Style::default()
@@ -85,7 +84,7 @@ fn section(title: &str, theme: crate::ui::app::ThemePalette) -> Line<'static> {
 
 fn divider(theme: crate::ui::app::ThemePalette) -> Line<'static> {
     Line::from(Span::styled(
-        "  ─────────────────────────────────────",
+        "  ──────────────────────────────",
         Style::default().fg(theme.muted),
     ))
 }
@@ -96,7 +95,7 @@ fn key_line(keys: &str, desc: &str, theme: crate::ui::app::ThemePalette) -> Line
     Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            format!("{:<12}", keys),
+            format!("{:<16}", keys),
             Style::default()
                 .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
@@ -119,7 +118,11 @@ fn build_left_column(theme: crate::ui::app::ThemePalette) -> Vec<Line<'static>> 
         key_line("Ctrl+u / Ctrl+d", "Jump 10 (vim style)", theme),
         key_line("g  /  G", "First / last entry", theme),
         key_line("Enter  Space", "Play highlighted track", theme),
-        key_line("/", "Live search — Esc to clear", theme),
+        key_line("/", "Search tags & folders", theme),
+        key_line("Esc", "Clear active filter", theme),
+        key_line("Wheel", "Scroll the list", theme),
+        key_line("Click", "Select · again to play", theme),
+        key_line("Click bar", "Seek to position", theme),
         blank(),
         section("VOLUME", theme),
         divider(theme),
@@ -147,8 +150,9 @@ fn build_right_column(theme: crate::ui::app::ThemePalette) -> Vec<Line<'static>>
         key_line("p", "Pause / resume", theme),
         key_line("x", "Stop playback", theme),
         key_line("n  /  b", "Next / previous track", theme),
-        key_line("s", "Shuffle (random track)", theme),
-        key_line("m", "Cycle repeat: off → all → one", theme),
+        key_line("s", "Jump to a random track", theme),
+        key_line("z", "Toggle shuffle playback", theme),
+        key_line("m", "Repeat: off → all → one", theme),
         blank(),
         section("SEEK", theme),
         divider(theme),
@@ -161,29 +165,10 @@ fn build_right_column(theme: crate::ui::app::ThemePalette) -> Vec<Line<'static>>
         key_line("t", "Cycle sort mode", theme),
         key_line("c", "Cycle theme (10 themes)", theme),
         key_line("i", "Track info popup", theme),
+        key_line("v", "Full-size album cover", theme),
         key_line("w", "Toggle waveform panel", theme),
         key_line("?  h  F1", "Toggle this help screen", theme),
-        key_line("q  /  Esc", "Quit meloic", theme),
+        key_line("q", "Quit meloic", theme),
         blank(),
     ]
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }

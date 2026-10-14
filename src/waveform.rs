@@ -16,21 +16,36 @@ pub enum WaveformState {
     Failed,
 }
 
+enum WaveformResult {
+    Ready(Vec<f32>),
+    Failed,
+    Skipped,
+}
+
 pub struct WaveformService {
     tx: Sender<PathBuf>,
-    rx: Receiver<(PathBuf, Option<Vec<f32>>)>,
+    rx: Receiver<(PathBuf, WaveformResult)>,
     cache: HashMap<PathBuf, WaveformState>,
 }
 
 impl WaveformService {
     pub fn new() -> Self {
         let (req_tx, req_rx) = channel::<PathBuf>();
-        let (res_tx, res_rx) = channel::<(PathBuf, Option<Vec<f32>>)>();
+        let (res_tx, res_rx) = channel::<(PathBuf, WaveformResult)>();
 
         thread::spawn(move || {
-            while let Ok(path) = req_rx.recv() {
-                let samples = compute_waveform(&path);
-                let _ = res_tx.send((path, samples));
+            while let Ok(mut path) = req_rx.recv() {
+                // Scrolling queues many requests; only decode the newest one and
+                // report the rest as skipped so they can be requested again later.
+                while let Ok(newer) = req_rx.try_recv() {
+                    let _ = res_tx.send((path, WaveformResult::Skipped));
+                    path = newer;
+                }
+                let result = match compute_waveform(&path) {
+                    Some(samples) if !samples.is_empty() => WaveformResult::Ready(samples),
+                    _ => WaveformResult::Failed,
+                };
+                let _ = res_tx.send((path, result));
             }
         });
 
@@ -51,12 +66,18 @@ impl WaveformService {
     }
 
     pub fn poll(&mut self) {
-        while let Ok((path, samples)) = self.rx.try_recv() {
-            let state = match samples {
-                Some(s) if !s.is_empty() => WaveformState::Ready(s),
-                _ => WaveformState::Failed,
-            };
-            self.cache.insert(path, state);
+        while let Ok((path, result)) = self.rx.try_recv() {
+            match result {
+                WaveformResult::Ready(samples) => {
+                    self.cache.insert(path, WaveformState::Ready(samples));
+                }
+                WaveformResult::Failed => {
+                    self.cache.insert(path, WaveformState::Failed);
+                }
+                WaveformResult::Skipped => {
+                    self.cache.remove(&path);
+                }
+            }
         }
     }
 
