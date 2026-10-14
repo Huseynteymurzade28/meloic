@@ -33,7 +33,8 @@ Album art, waveform display, queue management, ten color themes and vim-style na
 
 **Library**
 - Live search across **title, artist, album and folder**
-- Tag-aware library: each row shows title, artist, album and duration
+- Tag-aware library: each row shows title, artist, album and duration; tags are read in the background
+- **Grouped views** by artist or album, with group headers and album track order
 - Sorting by name or folder, random track selection, vim-style and arrow-key navigation
 - **Mouse support:** scroll the list, click to select, click again to play, click the progress bar to seek
 - Track info popup with tags, sample rate, bit depth, channels and file size
@@ -153,7 +154,7 @@ Press <kbd>?</kbd> inside meloic for the full reference.
 | `i` | Track info |
 | `w` | Toggle waveform |
 | `c` | Next theme |
-| `t` | Cycle sort mode |
+| `t` | Sort: name, folder, artist, album |
 | `r` / `F5` | Rescan library |
 | `q` | Quit |
 
@@ -179,7 +180,7 @@ volume = 80
 muted = false
 shuffle = false
 repeat = off        # off, all, one
-sort = name-asc     # name-asc, name-desc, folder
+sort = name-asc     # name-asc, name-desc, folder, artist, album
 ```
 
 Invalid values are ignored and fall back to defaults. Settings from older versions (the `theme` file) are migrated automatically.
