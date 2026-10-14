@@ -1,10 +1,10 @@
 <div align="center">
 
-# ♫ meloic
+# meloic
 
-**A fast, good-looking music player for your terminal, written in Rust.**
+**A fast terminal music player written in Rust.**
 
-Real album covers, a live waveform, a queue, ten themes and vim-style keys. It all runs in one terminal window.
+Album art, waveform display, queue management, ten color themes and vim-style navigation, all in a single terminal window.
 
 [![Crates.io](https://img.shields.io/crates/v/meloic?style=flat-square&color=cba6f7)](https://crates.io/crates/meloic)
 [![AUR](https://img.shields.io/aur/version/meloic?style=flat-square&color=89b4fa)](https://aur.archlinux.org/packages/meloic)
@@ -17,32 +17,32 @@ Real album covers, a live waveform, a queue, ten themes and vim-style keys. It a
 
 ---
 
-## ✨ Features
+## Features
 
-**🎨 Looks good**
-- **Real album covers.** In terminals with a graphics protocol (kitty, Sixel) covers are drawn at full pixel resolution. Other terminals get a colour halfblock version.
-- **Full-size cover view.** Press `v` to see the cover large, with track details and progress below it.
-- **Live waveform.** Each track is drawn as a bar waveform, and the played part is highlighted as the song moves on.
-- **10 themes:** Catppuccin, Tokyo Night, Nord, Gruvbox, Solarized, Rosé Pine, Dracula, Material, Monokai and Neon. Your choice is saved between sessions.
-- **Responsive layout.** The sidebar hides itself on narrow terminals, so the library always fits.
+**Interface**
+- **Real album covers.** In terminals with a graphics protocol (kitty, Sixel) covers are drawn at full pixel resolution. Other terminals use a color halfblock fallback.
+- **Full-size cover view.** Press `v` to show the cover at full size, with track details and progress.
+- **Waveform display.** Each track is rendered as a bar waveform, with playback progress highlighted.
+- **10 themes:** Catppuccin, Tokyo Night, Nord, Gruvbox, Solarized, Rosé Pine, Dracula, Material, Monokai and Neon. The selected theme persists between sessions.
+- **Responsive layout.** The sidebar is hidden automatically on narrow terminals.
 
-**🎵 Plays well**
+**Playback**
 - MP3, FLAC, WAV, OGG, M4A and AAC
 - Seek, volume, mute, repeat (off / all / one) and shuffle
-- Moves on to the next track by itself, or to the next one in the queue
+- Automatic advance to the next queued or listed track
 
-**📚 Easy to browse**
+**Library**
 - Live search across **title, artist, album and folder**
 - Tag-aware library: each row shows title, artist, album and duration
-- Sort by name or folder, jump to a random track, vim keys or arrow keys
+- Sorting by name or folder, random track selection, vim-style and arrow-key navigation
 - **Mouse support:** scroll the list, click to select, click again to play, click the progress bar to seek
 - Track info popup with tags, sample rate, bit depth, channels and file size
 
-**📜 Queue & playlists**
-- Build a queue on the fly and manage it in a popup
-- Save and load it as an M3U playlist, or start meloic with any `.m3u` / `.m3u8` file
+**Queue and playlists**
+- Build and manage a playback queue
+- Save and load the queue as an M3U playlist, or start meloic with any `.m3u` / `.m3u8` file
 
-## 📸 Screenshots
+## Screenshots
 
 <table>
   <tr>
@@ -58,7 +58,7 @@ Real album covers, a live waveform, a queue, ten themes and vim-style keys. It a
 > The music in these screenshots is in the **public domain** (CC0 1.0): albums by [Komiku](https://archive.org/details/Komiku-Poupis_incredible_adventures) and [Loyalty Freak Music](https://archive.org/details/ROBOTDANCE), hosted on the Internet Archive.
 > You can fetch the same library with [`scripts/fetch_demo_library.py`](scripts/fetch_demo_library.py).
 
-## 📦 Installation
+## Installation
 
 ### Arch Linux (AUR)
 
@@ -83,7 +83,7 @@ cargo build --release
 
 **Requirements:** Rust **1.85+** (edition 2024). On Linux you also need the ALSA development headers: `alsa-lib` on Arch, `libasound2-dev` on Debian/Ubuntu.
 
-## 🚀 Usage
+## Usage
 
 ```bash
 meloic                      # scan the default music folders
@@ -105,7 +105,7 @@ meloic reads the cover embedded in each file's tags and checks your terminal whe
 
 To force halfblocks, run `MELOIC_NO_GRAPHICS=1 meloic`. The cover popup shows which mode is in use in its top-right corner.
 
-## ⌨️ Keybindings
+## Keybindings
 
 Press <kbd>?</kbd> inside meloic for the full reference.
 
@@ -162,7 +162,7 @@ Press <kbd>?</kbd> inside meloic for the full reference.
 
 **Mouse:** use the wheel to scroll, click to select, click the same track again to play it, and click the progress bar to seek.
 
-## ⚙️ Configuration
+## Configuration
 
 meloic saves its state in `~/.config/meloic/`:
 
@@ -171,9 +171,9 @@ meloic saves its state in `~/.config/meloic/`:
 | `theme` | The last theme you picked |
 | `queue.m3u` | The queue saved with `S`, loaded with `L` |
 
-## 🖼️ Demo library
+## Demo library
 
-Want to try meloic, or record a demo, without using your own (possibly copyrighted) music? Download a small public-domain library:
+To try meloic or record a demo without using copyrighted music, download a small public-domain library:
 
 ```bash
 python3 scripts/fetch_demo_library.py demo-music   # Python standard library only, ~60 MB
@@ -182,7 +182,7 @@ meloic demo-music
 
 This downloads 16 tracks from 5 CC0 albums by Komiku and Loyalty Freak Music, with tags and covers already embedded, and writes a `CREDITS.md` next to them. Before downloading, the script checks that each album on the Internet Archive is still marked CC0.
 
-## 🏗️ Project structure
+## Project structure
 
 ```
 src/
@@ -204,7 +204,7 @@ scripts/
 
 Built with [ratatui](https://ratatui.rs), [rodio](https://github.com/RustAudio/rodio), [lofty](https://github.com/Serial-ATA/lofty-rs) and [ratatui-image](https://github.com/benjajaja/ratatui-image).
 
-## 🤝 Contributing
+## Contributing
 
 Issues and pull requests are welcome.
 
@@ -213,14 +213,11 @@ Issues and pull requests are welcome.
 3. Commit your changes and run `cargo fmt` and `cargo clippy`
 4. Open a pull request
 
-Found a bug or have an idea? [Open an issue](https://github.com/Huseynteymurzade28/meloic/issues).
+Bug reports and feature requests: [open an issue](https://github.com/Huseynteymurzade28/meloic/issues).
 
-## 📄 License
+## License
 
 meloic is released under the [MIT License](LICENSE).
 
-Demo music: Komiku and Loyalty Freak Music, CC0 1.0 (public domain). Thank you for sharing your work freely! 💜
+Demo music: Komiku and Loyalty Freak Music, CC0 1.0 (public domain).
 
----
-
-<div align="center"><sub>Music, in its purest form — right in your terminal. 🎵</sub></div>
