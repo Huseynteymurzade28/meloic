@@ -162,7 +162,7 @@ fn build_right_column(theme: crate::ui::app::ThemePalette) -> Vec<Line<'static>>
         section("LIBRARY & DISPLAY", theme),
         divider(theme),
         key_line("r  /  F5", "Rescan music roots", theme),
-        key_line("t", "Cycle sort mode", theme),
+        key_line("t", "Sort: name, folder, artist, album", theme),
         key_line("c", "Cycle theme (10 themes)", theme),
         key_line("i", "Track info popup", theme),
         key_line("v", "Full-size album cover", theme),

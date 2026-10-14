@@ -1,7 +1,7 @@
 use crate::metadata::{self, TrackMetadata};
 use crate::ui::app::{
-    App, LIST_ROW_HEIGHT, PlaybackState, ThemePalette, ViewMode, track_display_name,
-    track_folder_name,
+    App, LIST_ROW_HEIGHT, LibraryRow, PlaybackState, SortMode, ThemePalette, ViewMode,
+    track_display_name, track_folder_name,
 };
 use crate::ui::cover::CoverSlot;
 use crate::ui::help::draw_help_screen;
@@ -11,7 +11,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+    },
 };
 use std::fs;
 use std::path::Path;
@@ -214,6 +216,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme.muted),
         ));
     }
+    let pending = app.metadata_loader.pending();
+    if pending > 0 {
+        left.push(Span::styled(
+            format!("   reading tags · {pending} left"),
+            Style::default().fg(theme.muted),
+        ));
+    }
 
     let width = inner.width as usize;
     let right_width: usize = right.iter().map(|s| s.width()).sum();
@@ -266,105 +275,208 @@ fn draw_library(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    // Load tags around the viewport so rows can show artist and duration.
-    let visible_rows = (inner.height / LIST_ROW_HEIGHT) as usize + 1;
+    // Load tags around the selection right away; the background loader
+    // fills in the rest of the library.
+    let visible_tracks = (inner.height / LIST_ROW_HEIGHT) as usize + 1;
     let anchor = app.state.selected().unwrap_or(0);
     app.ensure_metadata_range(
-        app.state.offset().min(anchor.saturating_sub(visible_rows)),
-        visible_rows * 2 + 1,
+        anchor.saturating_sub(visible_tracks),
+        visible_tracks * 2 + 1,
     );
+
+    let offset = scroll_offset(app, inner.height);
+    app.list_offset = offset;
 
     let width = inner.width as usize;
     let selected = app.state.selected();
     let eq = eq_glyph(app);
 
-    let items: Vec<ListItem> = app
-        .get_display_items()
-        .iter()
-        .enumerate()
-        .map(|(idx, (_, path))| {
-            let is_selected = Some(idx) == selected;
-            let is_playing = app.current_track.as_ref() == Some(path);
-            let meta = app.metadata_for(path);
+    // Only build the rows that fit on screen.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut used = 0;
+    for row in app.rows.iter().skip(offset) {
+        if used >= inner.height {
+            break;
+        }
+        used += row.height();
+        items.push(match row {
+            LibraryRow::Header {
+                title,
+                detail,
+                tracks,
+            } => group_header(title, detail, *tracks, width, theme),
+            LibraryRow::Track(idx) => {
+                let path = &app.filtered_items[*idx].1;
+                track_item(app, *idx, path, Some(*idx) == selected, eq, width, theme)
+            }
+        });
+    }
 
-            let (marker, marker_color) = if is_playing {
-                (eq.to_string(), theme.success)
-            } else if is_selected {
-                ("  ›".to_string(), theme.accent)
-            } else {
-                (format!("{:>3}", idx + 1), theme.muted)
-            };
-
-            let duration = meta
-                .and_then(|m| m.duration)
-                .map(metadata::format_duration)
-                .unwrap_or_default();
-
-            let title_style = if is_playing {
-                Style::default()
-                    .fg(theme.success)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_selected {
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.text)
-            };
-
-            let title_room = width.saturating_sub(6 + text_width(&duration) + 1);
-            let line1 = spread(
-                vec![
-                    Span::styled(format!("{marker}  "), Style::default().fg(marker_color)),
-                    Span::styled(fit(&track_title(app, path), title_room), title_style),
-                ],
-                vec![
-                    Span::styled(duration, Style::default().fg(theme.muted)),
-                    Span::raw(" "),
-                ],
-                width,
-            );
-
-            let artist = track_artist(app, path);
-            let album = meta
-                .and_then(|m| m.album.clone())
-                .unwrap_or_else(|| track_folder_name(path));
-            let subtitle = match artist {
-                Some(artist) => format!("{artist} · {album}"),
-                None => album,
-            };
-            let ext = track_extension(path);
-            let sub_room = width.saturating_sub(5 + text_width(&ext) + 1);
-            let line2 = spread(
-                vec![
-                    Span::raw("     "),
-                    Span::styled(
-                        fit(&subtitle, sub_room),
-                        Style::default().fg(if is_selected {
-                            theme.accent
-                        } else {
-                            theme.muted
-                        }),
-                    ),
-                ],
-                vec![
-                    Span::styled(ext, Style::default().fg(theme.muted)),
-                    Span::raw(" "),
-                ],
-                width,
-            );
-
-            ListItem::new(vec![line1, line2])
-        })
-        .collect();
-
+    let mut state = ListState::default();
+    state.select(app.selected_row().map(|row| row - offset));
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().bg(theme.selection_bg));
-    f.render_stateful_widget(list, area, &mut app.state);
+    f.render_stateful_widget(list, area, &mut state);
 
     let mut hit = app.hit_areas.get();
     hit.list = inner;
-    hit.list_offset = app.state.offset();
     app.hit_areas.set(hit);
+}
+
+/// First row to draw so the selection stays visible, keeping the header of
+/// the selected track's group on screen when possible.
+fn scroll_offset(app: &App, height: u16) -> usize {
+    let Some(selected) = app.selected_row() else {
+        return 0;
+    };
+    let rows_height = |from: usize| -> u16 {
+        app.rows[from..=selected]
+            .iter()
+            .map(LibraryRow::height)
+            .sum()
+    };
+    // Everything up to the selection fits: no need to scroll at all.
+    if rows_height(0) <= height {
+        return 0;
+    }
+
+    // Scrolling down: advance until the selected row fits entirely.
+    let mut offset = app.list_offset.min(selected);
+    while offset < selected && rows_height(offset) > height {
+        offset += 1;
+    }
+    // Never start right below a group header when there is room for it.
+    // This also covers rows shifting as tags load in the background.
+    while offset > 0
+        && matches!(app.rows[offset - 1], LibraryRow::Header { .. })
+        && rows_height(offset - 1) <= height
+    {
+        offset -= 1;
+    }
+    offset
+}
+
+fn group_header<'a>(
+    title: &str,
+    detail: &str,
+    tracks: usize,
+    width: usize,
+    theme: ThemePalette,
+) -> ListItem<'a> {
+    let count = format!("{tracks} track{} ", if tracks == 1 { "" } else { "s" });
+    let room = width.saturating_sub(text_width(&count) + 4);
+    let title = fit(title, room);
+    let detail = fit(detail, room.saturating_sub(text_width(&title) + 3));
+    let mut left = vec![
+        Span::styled("▍ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if !detail.is_empty() {
+        left.push(Span::styled(
+            format!("  {detail}"),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    ListItem::new(spread(
+        left,
+        vec![Span::styled(count, Style::default().fg(theme.muted))],
+        width,
+    ))
+}
+
+fn track_item<'a>(
+    app: &App,
+    idx: usize,
+    path: &Path,
+    is_selected: bool,
+    eq: &str,
+    width: usize,
+    theme: ThemePalette,
+) -> ListItem<'a> {
+    let is_playing = app.current_track.as_deref() == Some(path);
+    let meta = app.metadata_for(path);
+
+    // Album view numbers tracks by their tag; other views by list position.
+    let number = match (app.sort_mode, meta.and_then(|m| m.track_number)) {
+        (SortMode::Album, Some(n)) => n as usize,
+        _ => idx + 1,
+    };
+    let (marker, marker_color) = if is_playing {
+        (eq.to_string(), theme.success)
+    } else if is_selected {
+        ("  ›".to_string(), theme.accent)
+    } else {
+        (format!("{number:>3}"), theme.muted)
+    };
+
+    let duration = meta
+        .and_then(|m| m.duration)
+        .map(metadata::format_duration)
+        .unwrap_or_default();
+
+    let title_style = if is_playing {
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
+    } else if is_selected {
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+
+    let title_room = width.saturating_sub(6 + text_width(&duration) + 1);
+    let line1 = spread(
+        vec![
+            Span::styled(format!("{marker}  "), Style::default().fg(marker_color)),
+            Span::styled(fit(&track_title(app, path), title_room), title_style),
+        ],
+        vec![
+            Span::styled(duration, Style::default().fg(theme.muted)),
+            Span::raw(" "),
+        ],
+        width,
+    );
+
+    // Skip whatever the group header above already says.
+    let artist = track_artist(app, path);
+    let album = meta
+        .and_then(|m| m.album.clone())
+        .unwrap_or_else(|| track_folder_name(path));
+    let subtitle = match (app.sort_mode, artist) {
+        (SortMode::Artist, _) => album,
+        (SortMode::Album, Some(artist)) => artist,
+        (SortMode::Album, None) => String::new(),
+        (_, Some(artist)) => format!("{artist} · {album}"),
+        (_, None) => album,
+    };
+    let ext = track_extension(path);
+    let sub_room = width.saturating_sub(5 + text_width(&ext) + 1);
+    let line2 = spread(
+        vec![
+            Span::raw("     "),
+            Span::styled(
+                fit(&subtitle, sub_room),
+                Style::default().fg(if is_selected {
+                    theme.accent
+                } else {
+                    theme.muted
+                }),
+            ),
+        ],
+        vec![
+            Span::styled(ext, Style::default().fg(theme.muted)),
+            Span::raw(" "),
+        ],
+        width,
+    );
+
+    ListItem::new(vec![line1, line2])
 }
 
 // ---------------------------------------------------------------- sidebar

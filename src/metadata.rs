@@ -1,7 +1,9 @@
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
 use lofty::tag::Accessor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
 use std::time::Duration;
 
 pub fn read_album_art(path: &Path) -> Option<Vec<u8>> {
@@ -71,5 +73,54 @@ pub fn format_duration(duration: Duration) -> String {
         format!("{}:{:02}:{:02}", hours, minutes, seconds)
     } else {
         format!("{}:{:02}", minutes, seconds)
+    }
+}
+
+/// Reads tags for whole batches of tracks on a background thread so grouping
+/// and search can use every track's metadata without blocking the UI.
+pub struct MetadataLoader {
+    tx: Sender<Vec<PathBuf>>,
+    rx: Receiver<(PathBuf, Option<TrackMetadata>)>,
+    pending: usize,
+}
+
+impl MetadataLoader {
+    pub fn new() -> Self {
+        let (req_tx, req_rx) = channel::<Vec<PathBuf>>();
+        let (res_tx, res_rx) = channel();
+
+        thread::spawn(move || {
+            while let Ok(batch) = req_rx.recv() {
+                for path in batch {
+                    let meta = read_metadata(&path);
+                    if res_tx.send((path, meta)).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Self {
+            tx: req_tx,
+            rx: res_rx,
+            pending: 0,
+        }
+    }
+
+    pub fn request(&mut self, paths: Vec<PathBuf>) {
+        self.pending += paths.len();
+        let _ = self.tx.send(paths);
+    }
+
+    /// Everything read since the last call.
+    pub fn poll(&mut self) -> Vec<(PathBuf, Option<TrackMetadata>)> {
+        let results: Vec<_> = self.rx.try_iter().collect();
+        self.pending = self.pending.saturating_sub(results.len());
+        results
+    }
+
+    /// Tracks still waiting to be read.
+    pub fn pending(&self) -> usize {
+        self.pending
     }
 }

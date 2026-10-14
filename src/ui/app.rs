@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::library;
-use crate::metadata::{self, TrackMetadata};
+use crate::metadata::{self, MetadataLoader, TrackMetadata};
 use crate::playlist;
 use crate::ui::cover::CoverRenderer;
 use crate::ui::settings::Settings;
@@ -26,7 +26,6 @@ const STATUS_TTL: Duration = Duration::from_secs(5);
 #[derive(Default, Clone, Copy)]
 pub struct HitAreas {
     pub list: Rect,
-    pub list_offset: usize,
     pub progress_bar: Rect,
 }
 
@@ -76,6 +75,8 @@ pub enum SortMode {
     NameAsc,
     NameDesc,
     Folder,
+    Artist,
+    Album,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,7 +254,9 @@ impl SortMode {
         match self {
             Self::NameAsc => Self::NameDesc,
             Self::NameDesc => Self::Folder,
-            Self::Folder => Self::NameAsc,
+            Self::Folder => Self::Artist,
+            Self::Artist => Self::Album,
+            Self::Album => Self::NameAsc,
         }
     }
 
@@ -262,6 +265,8 @@ impl SortMode {
             Self::NameAsc => "name a-z",
             Self::NameDesc => "name z-a",
             Self::Folder => "folder",
+            Self::Artist => "artist",
+            Self::Album => "album",
         }
     }
 
@@ -271,7 +276,14 @@ impl SortMode {
             Self::NameAsc => "name-asc",
             Self::NameDesc => "name-desc",
             Self::Folder => "folder",
+            Self::Artist => "artist",
+            Self::Album => "album",
         }
+    }
+
+    /// Whether the library is shown under artist / album headers.
+    pub fn is_grouped(self) -> bool {
+        matches!(self, Self::Artist | Self::Album)
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
@@ -279,7 +291,30 @@ impl SortMode {
             "name-asc" => Some(Self::NameAsc),
             "name-desc" => Some(Self::NameDesc),
             "folder" => Some(Self::Folder),
+            "artist" => Some(Self::Artist),
+            "album" => Some(Self::Album),
             _ => None,
+        }
+    }
+}
+
+/// One line group of the library list: a group header or a track, where the
+/// track index points into `App::filtered_items`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibraryRow {
+    Header {
+        title: String,
+        detail: String,
+        tracks: usize,
+    },
+    Track(usize),
+}
+
+impl LibraryRow {
+    pub fn height(&self) -> u16 {
+        match self {
+            Self::Header { .. } => 1,
+            Self::Track(_) => LIST_ROW_HEIGHT,
         }
     }
 }
@@ -320,6 +355,13 @@ pub struct App {
     pub volume_before_mute: f32,
     pub queue: Vec<PathBuf>,
     pub metadata_cache: HashMap<PathBuf, Option<TrackMetadata>>,
+    pub metadata_loader: MetadataLoader,
+    /// Library rows (headers + tracks) for the current sort and filter.
+    pub rows: Vec<LibraryRow>,
+    /// Row index of each entry in `filtered_items`.
+    pub track_rows: Vec<usize>,
+    /// First row drawn in the library list.
+    pub list_offset: usize,
     pub waveform: WaveformService,
     pub album_art_cache: HashMap<PathBuf, Option<Vec<u8>>>,
     pub covers: RefCell<CoverRenderer>,
@@ -365,6 +407,10 @@ impl App {
             volume_before_mute: settings.volume,
             queue: initial_queue,
             metadata_cache: HashMap::new(),
+            metadata_loader: MetadataLoader::new(),
+            rows: Vec::new(),
+            track_rows: Vec::new(),
+            list_offset: 0,
             waveform: WaveformService::new(),
             album_art_cache: HashMap::new(),
             covers: RefCell::new(CoverRenderer::new(picker)),
@@ -374,7 +420,21 @@ impl App {
             status_seen: RefCell::new((String::new(), Instant::now())),
         };
         app.update_filtered_items();
+        app.load_all_metadata();
         app
+    }
+
+    /// Queue tag reading for every track not read yet.
+    fn load_all_metadata(&mut self) {
+        let missing: Vec<PathBuf> = self
+            .items
+            .iter()
+            .filter(|p| !self.metadata_cache.contains_key(*p))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            self.metadata_loader.request(missing);
+        }
     }
 
     pub fn select_first(&mut self) {
@@ -598,10 +658,9 @@ impl App {
         }
 
         if contains(hit.list) {
-            let index = hit.list_offset + ((row - hit.list.y) / LIST_ROW_HEIGHT) as usize;
-            if index >= self.filtered_items.len() {
+            let Some(index) = self.track_at(row - hit.list.y) else {
                 return Ok(());
-            }
+            };
             if self.state.selected() == Some(index) {
                 return self.play_selected();
             }
@@ -611,6 +670,22 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Track shown `y` lines below the top of the list, if any (not a header).
+    fn track_at(&self, y: u16) -> Option<usize> {
+        let mut top = 0;
+        for row in self.rows.iter().skip(self.list_offset) {
+            let height = row.height();
+            if y < top + height {
+                return match row {
+                    LibraryRow::Track(index) => Some(*index),
+                    LibraryRow::Header { .. } => None,
+                };
+            }
+            top += height;
+        }
+        None
     }
 
     /// Status message plus whether it is still fresh (recently changed).
@@ -673,18 +748,13 @@ impl App {
             .map(|(i, path)| (i, path.clone()))
             .collect();
 
-        self.filtered_items.sort_by(|a, b| {
-            let a_name = display_name(&a.1).to_lowercase();
-            let b_name = display_name(&b.1).to_lowercase();
-            let a_folder = folder_name(&a.1).to_lowercase();
-            let b_folder = folder_name(&b.1).to_lowercase();
-
-            match self.sort_mode {
-                SortMode::NameAsc => a_name.cmp(&b_name),
-                SortMode::NameDesc => b_name.cmp(&a_name),
-                SortMode::Folder => a_folder.cmp(&b_folder).then(a_name.cmp(&b_name)),
-            }
-        });
+        let mut items = std::mem::take(&mut self.filtered_items);
+        items.sort_by_cached_key(|(_, path)| self.sort_key(path));
+        if self.sort_mode == SortMode::NameDesc {
+            items.reverse();
+        }
+        self.filtered_items = items;
+        self.rebuild_rows();
 
         if self.filtered_items.is_empty() {
             self.state.select(None);
@@ -705,10 +775,88 @@ impl App {
         self.state.select(Some(0));
     }
 
+    /// (group, sub-group, track number, name) — compared in that order.
+    fn sort_key(&self, path: &Path) -> (String, String, u32, String) {
+        let name = display_name(path).to_lowercase();
+        let meta = self.metadata_for(path);
+        let track_no = meta.and_then(|m| m.track_number).unwrap_or(u32::MAX);
+        match self.sort_mode {
+            SortMode::NameAsc | SortMode::NameDesc => (String::new(), String::new(), 0, name),
+            SortMode::Folder => (folder_name(path).to_lowercase(), String::new(), 0, name),
+            SortMode::Artist => (
+                group_sort_name(meta.and_then(|m| m.artist.as_deref())),
+                album_name(meta, path).to_lowercase(),
+                track_no,
+                name,
+            ),
+            SortMode::Album => (
+                album_name(meta, path).to_lowercase(),
+                group_sort_name(meta.and_then(|m| m.artist.as_deref())),
+                track_no,
+                name,
+            ),
+        }
+    }
+
+    /// Rebuild `rows`, inserting a header wherever the artist / album changes.
+    fn rebuild_rows(&mut self) {
+        let mut rows = Vec::with_capacity(self.filtered_items.len());
+        let mut track_rows = Vec::with_capacity(self.filtered_items.len());
+        let mut current_group: Option<String> = None;
+        let mut header_at = 0;
+
+        for (index, (_, path)) in self.filtered_items.iter().enumerate() {
+            if self.sort_mode.is_grouped() {
+                let meta = self.metadata_for(path);
+                let artist = meta
+                    .and_then(|m| m.artist.clone())
+                    .unwrap_or_else(|| "Unknown artist".to_string());
+                let album = album_name(meta, path);
+                let (key, title, detail) = if self.sort_mode == SortMode::Artist {
+                    (artist.to_lowercase(), artist, String::new())
+                } else {
+                    let detail = match meta.and_then(|m| m.year) {
+                        Some(year) => format!("{artist} · {year}"),
+                        None => artist.clone(),
+                    };
+                    (
+                        format!("{}\u{0}{}", album.to_lowercase(), artist.to_lowercase()),
+                        album,
+                        detail,
+                    )
+                };
+                if current_group.as_deref() != Some(key.as_str()) {
+                    header_at = rows.len();
+                    rows.push(LibraryRow::Header {
+                        title,
+                        detail,
+                        tracks: 0,
+                    });
+                    current_group = Some(key);
+                }
+                if let LibraryRow::Header { tracks, .. } = &mut rows[header_at] {
+                    *tracks += 1;
+                }
+            }
+            track_rows.push(rows.len());
+            rows.push(LibraryRow::Track(index));
+        }
+
+        self.rows = rows;
+        self.track_rows = track_rows;
+    }
+
+    pub fn selected_row(&self) -> Option<usize> {
+        self.state
+            .selected()
+            .and_then(|i| self.track_rows.get(i).copied())
+    }
+
     pub fn refresh(&mut self) {
         self.items = library::scan_music_roots(&self.scan_roots);
         self.total_tracks = self.items.len();
         self.update_filtered_items();
+        self.load_all_metadata();
         self.status_message = format!("Refreshed library: {} tracks", self.total_tracks);
     }
 
@@ -721,10 +869,6 @@ impl App {
 
     pub fn is_empty(&self) -> bool {
         self.filtered_items.is_empty()
-    }
-
-    pub fn get_display_items(&self) -> &Vec<(usize, PathBuf)> {
-        &self.filtered_items
     }
 
     pub fn current_track_index(&self) -> Option<usize> {
@@ -979,6 +1123,22 @@ impl App {
 
     pub fn update_playback_status(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.waveform.poll();
+
+        let loaded = self.metadata_loader.poll();
+        if !loaded.is_empty() {
+            for (path, meta) in loaded {
+                self.metadata_cache.entry(path).or_insert(meta);
+            }
+            // Groups and tag search depend on metadata; refresh them as tags arrive.
+            if self.sort_mode.is_grouped() || !self.search_query.is_empty() {
+                // Stay at the top while the list reorders under an untouched selection.
+                let at_top = self.state.selected() == Some(0);
+                self.update_filtered_items();
+                if at_top && !self.filtered_items.is_empty() {
+                    self.state.select(Some(0));
+                }
+            }
+        }
 
         // The waveform panel follows the playing track, falling back to the
         // selection; re-request whichever one a skipped decode left empty.
@@ -1318,6 +1478,20 @@ fn strip_video_id_suffix(name: &str) -> String {
     }
 }
 
+/// Album tag, or the folder name for untagged files.
+fn album_name(meta: Option<&TrackMetadata>, path: &Path) -> String {
+    meta.and_then(|m| m.album.clone())
+        .unwrap_or_else(|| folder_name(path))
+}
+
+/// Lowercased sort name; missing values sort after everything else.
+fn group_sort_name(value: Option<&str>) -> String {
+    match value {
+        Some(v) => v.to_lowercase(),
+        None => "\u{10FFFF}".to_string(),
+    }
+}
+
 fn folder_name(path: &Path) -> String {
     path.parent()
         .and_then(|parent| parent.file_name())
@@ -1332,4 +1506,107 @@ pub fn track_display_name(path: &Path) -> String {
 
 pub fn track_folder_name(path: &Path) -> String {
     folder_name(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(artist: &str, album: &str, track: u32) -> Option<TrackMetadata> {
+        Some(TrackMetadata {
+            title: Some(format!("{album} {track}")),
+            artist: Some(artist.to_string()),
+            album: Some(album.to_string()),
+            track_number: Some(track),
+            ..Default::default()
+        })
+    }
+
+    /// App over fake paths with tags injected, so no files are read.
+    fn app_with(tracks: &[(&str, &str, &str, u32)], sort: SortMode) -> App {
+        let paths: Vec<PathBuf> = tracks.iter().map(|t| PathBuf::from(t.0)).collect();
+        let mut app = App::new(paths, Vec::new(), Vec::new(), None);
+        for (path, artist, album, track) in tracks {
+            app.metadata_cache
+                .insert(PathBuf::from(path), meta(artist, album, *track));
+        }
+        app.sort_mode = sort;
+        app.update_filtered_items();
+        app
+    }
+
+    fn headers(app: &App) -> Vec<(String, usize)> {
+        app.rows
+            .iter()
+            .filter_map(|row| match row {
+                LibraryRow::Header { title, tracks, .. } => Some((title.clone(), *tracks)),
+                LibraryRow::Track(_) => None,
+            })
+            .collect()
+    }
+
+    const LIBRARY: &[(&str, &str, &str, u32)] = &[
+        ("/m/z.mp3", "Komiku", "Tale on the Late", 2),
+        ("/m/a.mp3", "Loyalty Freak Music", "Robot Dance", 1),
+        ("/m/b.mp3", "Komiku", "Tale on the Late", 1),
+        ("/m/c.mp3", "Komiku", "Poupi", 5),
+    ];
+
+    #[test]
+    fn name_sort_has_no_headers() {
+        let app = app_with(LIBRARY, SortMode::NameAsc);
+        assert!(headers(&app).is_empty());
+        assert_eq!(app.rows.len(), LIBRARY.len());
+    }
+
+    #[test]
+    fn artist_view_groups_and_orders_by_album_then_track() {
+        let app = app_with(LIBRARY, SortMode::Artist);
+        assert_eq!(
+            headers(&app),
+            vec![("Komiku".into(), 3), ("Loyalty Freak Music".into(), 1)]
+        );
+        let order: Vec<&str> = app
+            .filtered_items
+            .iter()
+            .map(|(_, p)| p.to_str().unwrap())
+            .collect();
+        assert_eq!(order, ["/m/c.mp3", "/m/b.mp3", "/m/z.mp3", "/m/a.mp3"]);
+    }
+
+    #[test]
+    fn album_view_groups_by_album() {
+        let app = app_with(LIBRARY, SortMode::Album);
+        assert_eq!(
+            headers(&app),
+            vec![
+                ("Poupi".into(), 1),
+                ("Robot Dance".into(), 1),
+                ("Tale on the Late".into(), 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn track_rows_point_at_tracks_and_clicks_skip_headers() {
+        let app = app_with(LIBRARY, SortMode::Artist);
+        for (track, row) in app.track_rows.iter().enumerate() {
+            assert_eq!(app.rows[*row], LibraryRow::Track(track));
+        }
+        // Row layout: header (1 line), then tracks of 2 lines each.
+        assert_eq!(app.track_at(0), None);
+        assert_eq!(app.track_at(1), Some(0));
+        assert_eq!(app.track_at(2), Some(0));
+        assert_eq!(app.track_at(3), Some(1));
+        assert_eq!(app.track_at(7), None); // second header
+        assert_eq!(app.track_at(8), Some(3));
+    }
+
+    #[test]
+    fn search_only_keeps_matching_groups() {
+        let mut app = app_with(LIBRARY, SortMode::Artist);
+        app.search_query = "robot".into();
+        app.update_filtered_items();
+        assert_eq!(headers(&app), vec![("Loyalty Freak Music".into(), 1)]);
+    }
 }
